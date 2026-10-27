@@ -2,6 +2,7 @@
 
 mod capture;
 mod clipboard;
+mod dragout;
 mod hotkey;
 mod overlay;
 mod storage;

@@ -169,14 +169,15 @@ unsafe extern "system" fn thumb_wndproc(
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
 
-            // Drag-out check will be hooked here in Step 8
-            if let Some((sx, sy)) = state.drag_start {
-                let dx = (x - sx).abs();
-                let dy = (y - sy).abs();
-                if dx > 4 || dy > 4 {
-                    // Movement > 4px initiates drag drop
-                    state.drag_start = None;
-                    start_drag_out(hwnd, state);
+            // Drag-out check
+            if (wparam.0 & 0x0001) != 0 {
+                if let Some((sx, sy)) = state.drag_start {
+                    let dx = (x - sx).abs();
+                    let dy = (y - sy).abs();
+                    if dx > 4 || dy > 4 {
+                        state.drag_start = None;
+                        start_drag_out(hwnd, state);
+                    }
                 }
             }
             LRESULT(0)
@@ -495,6 +496,6 @@ fn downscale_rgba(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) ->
     dst
 }
 
-fn start_drag_out(_hwnd: HWND, _state: &ThumbnailState) {
-    // Step 8 will implement DoDragDrop
+fn start_drag_out(_hwnd: HWND, state: &ThumbnailState) {
+    crate::dragout::execute_drag_drop(&state.saved_path, state.hbitmap, state.width, state.height);
 }

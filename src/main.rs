@@ -3,6 +3,7 @@
 mod capture;
 mod hotkey;
 mod overlay;
+mod storage;
 mod tray;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,14 +43,24 @@ unsafe extern "system" fn wndproc(
                     Ok(frame) => {
                         let selected_rect = overlay::run_overlay(&frame);
                         if let Some(rect) = selected_rect {
-                            let msg = format!(
-                                "Confirmed selection: [{}, {}, {}, {}]\n",
-                                rect.left, rect.top, rect.right, rect.bottom
-                            );
-                            let msg_w: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
-                            windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
-                                PCWSTR(msg_w.as_ptr()),
-                            );
+                            if let Some((rgba, w, h)) = frame.crop_to_rgba(rect) {
+                                match storage::save_png(&rgba, w, h) {
+                                    Ok((saved_path, _png_bytes)) => {
+                                        let msg = format!("Saved screenshot: {}\n", saved_path.display());
+                                        let msg_w: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
+                                        windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
+                                            PCWSTR(msg_w.as_ptr()),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        let err_msg = format!("Failed to save screenshot: {e}\n");
+                                        let err_w: Vec<u16> = err_msg.encode_utf16().chain(std::iter::once(0)).collect();
+                                        windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
+                                            PCWSTR(err_w.as_ptr()),
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(e) => {

@@ -1,6 +1,7 @@
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::StationsAndDesktops::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 pub struct CapturedFrame {
@@ -17,6 +18,12 @@ pub struct CapturedFrame {
 impl CapturedFrame {
     pub fn capture() -> Result<Self> {
         unsafe {
+            // Ensure thread is attached to active input desktop
+            if let Ok(hdesk) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_ACCESS_FLAGS(0x01FF)) {
+                let _ = SetThreadDesktop(hdesk);
+                let _ = CloseDesktop(hdesk);
+            }
+
             let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
             let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
             let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -75,9 +82,18 @@ impl CapturedFrame {
 
             let old_bitmap = SelectObject(hdc_mem, HGDIOBJ(hbitmap.0));
 
-            // BitBlt virtual desktop into DIB
-            let rop = ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0);
-            let blt_res = BitBlt(hdc_mem, 0, 0, width, height, Some(hdc_screen), vx, vy, rop);
+            // Try BitBlt with CAPTUREBLT first. If protected content / display affinity
+            // returns ERROR_ACCESS_DENIED (5), fallback to standard SRCCOPY.
+            let rop_capture = ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0);
+            let blt_res = BitBlt(hdc_mem, 0, 0, width, height, Some(hdc_screen), vx, vy, rop_capture);
+            let blt_res = match blt_res {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    // Fallback to SRCCOPY
+                    BitBlt(hdc_mem, 0, 0, width, height, Some(hdc_screen), vx, vy, SRCCOPY)
+                        .map_err(|_| e)
+                }
+            };
 
             // Release screen DC immediately
             ReleaseDC(None, hdc_screen);

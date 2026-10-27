@@ -2,6 +2,7 @@
 
 mod capture;
 mod hotkey;
+mod overlay;
 mod tray;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,14 +40,17 @@ unsafe extern "system" fn wndproc(
             if wparam.0 as i32 == hotkey::SNAPDOCK_HOTKEY_ID {
                 match capture::CapturedFrame::capture() {
                     Ok(frame) => {
-                        let msg = format!(
-                            "Captured desktop: {}x{} at ({},{})\n",
-                            frame.width, frame.height, frame.vx, frame.vy
-                        );
-                        let msg_w: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
-                        windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
-                            PCWSTR(msg_w.as_ptr()),
-                        );
+                        let selected_rect = overlay::run_overlay(&frame);
+                        if let Some(rect) = selected_rect {
+                            let msg = format!(
+                                "Confirmed selection: [{}, {}, {}, {}]\n",
+                                rect.left, rect.top, rect.right, rect.bottom
+                            );
+                            let msg_w: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
+                            windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
+                                PCWSTR(msg_w.as_ptr()),
+                            );
+                        }
                     }
                     Err(e) => {
                         let err_msg = format!("Capture failed: {e}\n");
@@ -76,6 +80,18 @@ unsafe extern "system" fn wndproc(
 }
 
 fn main() -> Result<()> {
+    // Attach UI thread to active input desktop before creating any windows
+    unsafe {
+        if let Ok(hdesk) = windows::Win32::System::StationsAndDesktops::OpenInputDesktop(
+            windows::Win32::System::StationsAndDesktops::DESKTOP_CONTROL_FLAGS(0),
+            false,
+            windows::Win32::System::StationsAndDesktops::DESKTOP_ACCESS_FLAGS(0x01FF),
+        ) {
+            let _ = windows::Win32::System::StationsAndDesktops::SetThreadDesktop(hdesk);
+            let _ = windows::Win32::System::StationsAndDesktops::CloseDesktop(hdesk);
+        }
+    }
+
     // Single-instance check
     let _mutex = unsafe {
         let m = CreateMutexW(None, true, w!("Local\\Snapdock_SingleInstance_Mutex"))?;

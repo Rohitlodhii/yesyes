@@ -4,6 +4,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::UI::Shell::*;
 
 pub const WM_SNAPDOCK_TRAY: u32 = WM_APP + 1;
+pub const IDM_SETTINGS: usize = 1000;
 pub const IDM_QUIT: usize = 1001;
 
 pub struct TrayIcon {
@@ -54,9 +55,22 @@ impl TrayIcon {
         }
     }
 
+    pub fn update_tip(&mut self, tip_str: &str) {
+        let tip = tip_str.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let len = tip.len().min(self.nid.szTip.len());
+        self.nid.szTip = [0; 128];
+        self.nid.szTip[..len].copy_from_slice(&tip[..len]);
+        self.nid.uFlags |= NIF_TIP;
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &self.nid);
+        }
+    }
+
     pub fn show_menu(&self, hwnd: HWND) {
         unsafe {
             if let Ok(hmenu) = CreatePopupMenu() {
+                let _ = AppendMenuW(hmenu, MF_STRING, IDM_SETTINGS, w!("Settings..."));
+                let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
                 let _ = AppendMenuW(hmenu, MF_STRING, IDM_QUIT, w!("Quit Snapdock"));
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);

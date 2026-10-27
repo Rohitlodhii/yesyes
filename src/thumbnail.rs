@@ -37,7 +37,13 @@ impl ThumbnailStack {
         rgba: &[u8],
         orig_w: u32,
         orig_h: u32,
+        lifespan: Option<u32>,
     ) {
+        // If lifespan is Some(0), thumbnail is disabled
+        if lifespan == Some(0) {
+            return;
+        }
+
         // Limit to at most 5 thumbnails; oldest dismissed first
         while self.thumbnails.len() >= 5 {
             let oldest = self.thumbnails.remove(0);
@@ -49,7 +55,7 @@ impl ThumbnailStack {
         let id = self.next_id;
         self.next_id += 1;
 
-        if let Some(thumb) = create_thumbnail_window(id, main_hwnd, saved_path, rgba, orig_w, orig_h) {
+        if let Some(thumb) = create_thumbnail_window(id, main_hwnd, saved_path, rgba, orig_w, orig_h, lifespan) {
             self.thumbnails.push(thumb);
             self.relayout();
         }
@@ -112,7 +118,7 @@ struct ThumbnailState {
     old_bitmap: HGDIOBJ,
 
     is_hovering: bool,
-    remaining_ticks: u32, // 8 seconds countdown (1-second timer)
+    remaining_ticks: Option<u32>, // None = infinite; Some(n) = countdown ticks
     copied_indicator: bool,
 
     drag_start: Option<(i32, i32)>,
@@ -136,18 +142,20 @@ unsafe extern "system" fn thumb_wndproc(
             if wparam.0 == TIMER_DISMISS_ID {
                 // Auto-dismiss paused while mouse hovers
                 if !state.is_hovering {
-                    if state.remaining_ticks > 0 {
-                        state.remaining_ticks -= 1;
-                    }
-                    if state.remaining_ticks == 0 {
-                        let _ = KillTimer(Some(hwnd), TIMER_DISMISS_ID);
-                        let _ = PostMessageW(
-                            Some(state.main_hwnd),
-                            WM_SNAPDOCK_THUMB_DISMISSED,
-                            WPARAM(state.id),
-                            LPARAM(0),
-                        );
-                        let _ = DestroyWindow(hwnd);
+                    if let Some(ticks) = state.remaining_ticks.as_mut() {
+                        if *ticks > 0 {
+                            *ticks -= 1;
+                        }
+                        if *ticks == 0 {
+                            let _ = KillTimer(Some(hwnd), TIMER_DISMISS_ID);
+                            let _ = PostMessageW(
+                                Some(state.main_hwnd),
+                                WM_SNAPDOCK_THUMB_DISMISSED,
+                                WPARAM(state.id),
+                                LPARAM(0),
+                            );
+                            let _ = DestroyWindow(hwnd);
+                        }
                     }
                 }
             }
@@ -341,6 +349,7 @@ fn create_thumbnail_window(
     rgba: &[u8],
     orig_w: u32,
     orig_h: u32,
+    lifespan: Option<u32>,
 ) -> Option<ThumbnailWindow> {
     if orig_w == 0 || orig_h == 0 {
         return None;
@@ -423,7 +432,7 @@ fn create_thumbnail_window(
             hbitmap,
             old_bitmap,
             is_hovering: false,
-            remaining_ticks: 8,
+            remaining_ticks: lifespan,
             copied_indicator: false,
             drag_start: None,
         });
@@ -463,8 +472,12 @@ fn create_thumbnail_window(
         let state_raw = Box::into_raw(state);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_raw as isize);
 
-        // Start 1-second auto-dismiss timer (8 ticks)
-        let _ = SetTimer(Some(hwnd), TIMER_DISMISS_ID, 1000, None);
+        // If timed, start 1-second auto-dismiss timer
+        if let Some(ticks) = lifespan {
+            if ticks > 0 {
+                let _ = SetTimer(Some(hwnd), TIMER_DISMISS_ID, 1000, None);
+            }
+        }
 
         Some(ThumbnailWindow {
             id,

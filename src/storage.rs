@@ -3,6 +3,7 @@ use std::io::{self, Cursor};
 use std::path::PathBuf;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 
+#[allow(dead_code)]
 pub fn get_save_dir() -> io::Result<PathBuf> {
     let user_profile = std::env::var("USERPROFILE")
         .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
@@ -13,8 +14,10 @@ pub fn get_save_dir() -> io::Result<PathBuf> {
     Ok(path)
 }
 
-pub fn generate_file_path() -> io::Result<PathBuf> {
-    let dir = get_save_dir()?;
+pub fn generate_file_path_in(dir: &std::path::Path) -> io::Result<PathBuf> {
+    if !dir.exists() {
+        fs::create_dir_all(dir)?;
+    }
     let st = unsafe { GetLocalTime() };
 
     let base_name = format!(
@@ -38,6 +41,12 @@ pub fn generate_file_path() -> io::Result<PathBuf> {
     Ok(dir.join(format!("{base_name}_{}.png", st.wMilliseconds)))
 }
 
+#[allow(dead_code)]
+pub fn generate_file_path() -> io::Result<PathBuf> {
+    let dir = get_save_dir()?;
+    generate_file_path_in(&dir)
+}
+
 pub fn encode_png_buffer(rgba: &[u8], width: u32, height: u32) -> io::Result<Vec<u8>> {
     let mut buffer = Vec::with_capacity((width * height) as usize);
     {
@@ -58,9 +67,15 @@ pub fn encode_png_buffer(rgba: &[u8], width: u32, height: u32) -> io::Result<Vec
     Ok(buffer)
 }
 
-pub fn save_png(rgba: &[u8], width: u32, height: u32) -> io::Result<(PathBuf, Vec<u8>)> {
+pub fn save_png_to_dir(dir: &std::path::Path, rgba: &[u8], width: u32, height: u32) -> io::Result<(PathBuf, Vec<u8>)> {
     let png_bytes = encode_png_buffer(rgba, width, height)?;
-    let path = generate_file_path()?;
+    let path = generate_file_path_in(dir)?;
     fs::write(&path, &png_bytes)?;
     Ok((path, png_bytes))
+}
+
+#[allow(dead_code)]
+pub fn save_png(rgba: &[u8], width: u32, height: u32) -> io::Result<(PathBuf, Vec<u8>)> {
+    let dir = get_save_dir()?;
+    save_png_to_dir(&dir, rgba, width, height)
 }

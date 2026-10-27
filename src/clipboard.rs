@@ -5,6 +5,43 @@ use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::Memory::*;
 use windows::Win32::System::Ole::CF_DIBV5;
 
+pub fn write_text(hwnd: Option<HWND>, text: &str) -> Result<()> {
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    let mut opened = false;
+    for _ in 0..10 {
+        if unsafe { OpenClipboard(hwnd).is_ok() } {
+            opened = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    if !opened {
+        return Err(Error::from_thread());
+    }
+
+    unsafe {
+        let _ = EmptyClipboard();
+        let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let byte_len = utf16.len() * std::mem::size_of::<u16>();
+
+        if let Ok(hglobal) = GlobalAlloc(GMEM_MOVEABLE, byte_len) {
+            let ptr = GlobalLock(hglobal);
+            if !ptr.is_null() {
+                std::ptr::copy_nonoverlapping(utf16.as_ptr() as *const u8, ptr as *mut u8, byte_len);
+                let _ = GlobalUnlock(hglobal);
+                let _ = SetClipboardData(13, Some(HANDLE(hglobal.0))); // CF_UNICODETEXT = 13
+            }
+        }
+        let _ = CloseClipboard();
+    }
+
+    Ok(())
+}
+
 pub fn write_image(
     hwnd: Option<HWND>,
     rgba: &[u8],

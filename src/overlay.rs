@@ -370,6 +370,7 @@ pub fn run_overlay(frame: &CapturedFrame) -> Option<RECT> {
         let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
 
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut state as *mut _ as isize);
+        let prev_foreground = GetForegroundWindow();
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
 
@@ -378,6 +379,12 @@ pub fn run_overlay(frame: &CapturedFrame) -> Option<RECT> {
         while state.is_active && GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+        }
+
+        // Restore typing focus to whatever app was active before capture
+        // (Must be called while overlay is still foreground to pass focus cleanly)
+        if !prev_foreground.is_invalid() {
+            let _ = SetForegroundWindow(prev_foreground);
         }
 
         let _ = DestroyWindow(hwnd);

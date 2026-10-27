@@ -45,6 +45,7 @@ pub fn encode_png_buffer(rgba: &[u8], width: u32, height: u32) -> io::Result<Vec
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         encoder.set_compression(png::Compression::Fast);
+        encoder.set_filter(png::Filter::NoFilter);
 
         let mut writer = encoder
             .write_header()

@@ -5,6 +5,7 @@ mod clipboard;
 mod hotkey;
 mod overlay;
 mod storage;
+mod thumbnail;
 mod tray;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +20,7 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 struct AppContext {
     tray_icon: tray::TrayIcon,
     _hotkey: hotkey::HotkeyManager,
+    thumb_stack: thumbnail::ThumbnailStack,
 }
 
 unsafe extern "system" fn wndproc(
@@ -35,6 +37,14 @@ unsafe extern "system" fn wndproc(
                 if !ctx_ptr.is_null() {
                     (*ctx_ptr).tray_icon.show_menu(hwnd);
                 }
+            }
+            LRESULT(0)
+        }
+        thumbnail::WM_SNAPDOCK_THUMB_DISMISSED => {
+            let id = wparam.0 as usize;
+            let ctx_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppContext;
+            if !ctx_ptr.is_null() {
+                (*ctx_ptr).thumb_stack.remove_by_id(id);
             }
             LRESULT(0)
         }
@@ -55,6 +65,18 @@ unsafe extern "system" fn wndproc(
                                             h,
                                             &png_bytes,
                                         );
+
+                                        // Push to floating thumbnail stack
+                                        let ctx_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppContext;
+                                        if !ctx_ptr.is_null() {
+                                            (*ctx_ptr).thumb_stack.push(
+                                                hwnd,
+                                                saved_path.clone(),
+                                                &rgba,
+                                                w,
+                                                h,
+                                            );
+                                        }
 
                                         let msg = format!("Saved screenshot: {}\n", saved_path.display());
                                         let msg_w: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
@@ -167,6 +189,7 @@ fn main() -> Result<()> {
         let ctx = AppContext {
             tray_icon,
             _hotkey,
+            thumb_stack: thumbnail::ThumbnailStack::new(),
         };
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &ctx as *const _ as isize);
 

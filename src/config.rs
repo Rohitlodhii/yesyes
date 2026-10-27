@@ -4,8 +4,15 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
-    pub hotkey_modifiers: u32,
-    pub hotkey_vk: u32,
+    pub region_hotkey_modifiers: u32,
+    pub region_hotkey_vk: u32,
+
+    pub fullscreen_hotkey_modifiers: u32,
+    pub fullscreen_hotkey_vk: u32,
+
+    pub history_hotkey_modifiers: u32,
+    pub history_hotkey_vk: u32,
+
     /// None = Infinite (stay until explicitly closed)
     /// Some(0) = Disabled (no thumbnail shown)
     /// Some(n) = Dismiss after n seconds
@@ -20,11 +27,19 @@ impl Default for AppConfig {
             .unwrap_or_else(|_| PathBuf::from("Snapdock"));
 
         Self {
-            // MOD_CONTROL (2) | MOD_SHIFT (4) = 6
-            hotkey_modifiers: 0x0002 | 0x0004,
-            // 'S' = 0x53
-            hotkey_vk: 0x53,
-            // Default to Infinite (stays until closed) as requested
+            // Region: Ctrl + Shift + S (MOD_CONTROL=2 | MOD_SHIFT=4, VK_S=0x53)
+            region_hotkey_modifiers: 0x0002 | 0x0004,
+            region_hotkey_vk: 0x53,
+
+            // Fullscreen: Ctrl + Shift + F (MOD_CONTROL=2 | MOD_SHIFT=4, VK_F=0x46)
+            fullscreen_hotkey_modifiers: 0x0002 | 0x0004,
+            fullscreen_hotkey_vk: 0x46,
+
+            // History: Ctrl + Shift + Space (MOD_CONTROL=2 | MOD_SHIFT=4, VK_SPACE=0x20)
+            history_hotkey_modifiers: 0x0002 | 0x0004,
+            history_hotkey_vk: 0x20,
+
+            // Default to Infinite (stays until closed)
             thumbnail_lifespan_secs: None,
             save_directory: save_dir,
         }
@@ -81,8 +96,15 @@ impl AppConfig {
             .replace('"', "\\\"");
 
         format!(
-            "{{\n  \"hotkey_modifiers\": {},\n  \"hotkey_vk\": {},\n  \"thumbnail_lifespan_secs\": {},\n  \"save_directory\": \"{}\"\n}}\n",
-            self.hotkey_modifiers, self.hotkey_vk, lifespan_str, dir_str
+            "{{\n  \"region_hotkey_modifiers\": {},\n  \"region_hotkey_vk\": {},\n  \"fullscreen_hotkey_modifiers\": {},\n  \"fullscreen_hotkey_vk\": {},\n  \"history_hotkey_modifiers\": {},\n  \"history_hotkey_vk\": {},\n  \"thumbnail_lifespan_secs\": {},\n  \"save_directory\": \"{}\"\n}}\n",
+            self.region_hotkey_modifiers,
+            self.region_hotkey_vk,
+            self.fullscreen_hotkey_modifiers,
+            self.fullscreen_hotkey_vk,
+            self.history_hotkey_modifiers,
+            self.history_hotkey_vk,
+            lifespan_str,
+            dir_str
         )
     }
 
@@ -97,14 +119,35 @@ impl AppConfig {
                     let val = val_part.trim().trim_end_matches(',').trim();
 
                     match key {
-                        "hotkey_modifiers" => {
+                        // Backward compatibility for earlier single hotkey format
+                        "hotkey_modifiers" | "region_hotkey_modifiers" => {
                             if let Ok(v) = val.parse::<u32>() {
-                                cfg.hotkey_modifiers = v;
+                                cfg.region_hotkey_modifiers = v;
                             }
                         }
-                        "hotkey_vk" => {
+                        "hotkey_vk" | "region_hotkey_vk" => {
                             if let Ok(v) = val.parse::<u32>() {
-                                cfg.hotkey_vk = v;
+                                cfg.region_hotkey_vk = v;
+                            }
+                        }
+                        "fullscreen_hotkey_modifiers" => {
+                            if let Ok(v) = val.parse::<u32>() {
+                                cfg.fullscreen_hotkey_modifiers = v;
+                            }
+                        }
+                        "fullscreen_hotkey_vk" => {
+                            if let Ok(v) = val.parse::<u32>() {
+                                cfg.fullscreen_hotkey_vk = v;
+                            }
+                        }
+                        "history_hotkey_modifiers" => {
+                            if let Ok(v) = val.parse::<u32>() {
+                                cfg.history_hotkey_modifiers = v;
+                            }
+                        }
+                        "history_hotkey_vk" => {
+                            if let Ok(v) = val.parse::<u32>() {
+                                cfg.history_hotkey_vk = v;
                             }
                         }
                         "thumbnail_lifespan_secs" => {
@@ -138,8 +181,12 @@ mod tests {
     #[test]
     fn test_config_json_roundtrip() {
         let mut cfg = AppConfig::default();
-        cfg.hotkey_modifiers = 7;
-        cfg.hotkey_vk = 65;
+        cfg.region_hotkey_modifiers = 7;
+        cfg.region_hotkey_vk = 65;
+        cfg.fullscreen_hotkey_modifiers = 3;
+        cfg.fullscreen_hotkey_vk = 70;
+        cfg.history_hotkey_modifiers = 6;
+        cfg.history_hotkey_vk = 32;
         cfg.thumbnail_lifespan_secs = Some(15);
         cfg.save_directory = PathBuf::from(r"C:\Custom\Screenshots");
 
@@ -147,10 +194,17 @@ mod tests {
         let parsed = AppConfig::from_json(&json).expect("parse failed");
         assert_eq!(cfg, parsed);
 
-        // Test null lifespan
-        cfg.thumbnail_lifespan_secs = None;
-        let json2 = cfg.to_json();
-        let parsed2 = AppConfig::from_json(&json2).expect("parse failed");
-        assert_eq!(cfg, parsed2);
+        // Test backward compatibility parsing
+        let legacy_json = r#"{
+  "hotkey_modifiers": 6,
+  "hotkey_vk": 83,
+  "thumbnail_lifespan_secs": null,
+  "save_directory": "C:\\Users\\test\\Pictures\\Snapdock"
+}"#;
+        let legacy_cfg = AppConfig::from_json(legacy_json).expect("parse legacy failed");
+        assert_eq!(legacy_cfg.region_hotkey_modifiers, 6);
+        assert_eq!(legacy_cfg.region_hotkey_vk, 83);
+        assert_eq!(legacy_cfg.fullscreen_hotkey_modifiers, 6);
+        assert_eq!(legacy_cfg.fullscreen_hotkey_vk, 0x46);
     }
 }

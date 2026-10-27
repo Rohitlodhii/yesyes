@@ -5,6 +5,7 @@ mod capture;
 mod clipboard;
 mod config;
 mod dragout;
+mod history;
 mod hotkey;
 mod overlay;
 mod settings;
@@ -15,6 +16,7 @@ mod tray;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::*;
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -26,6 +28,7 @@ struct AppContext {
     tray_icon: tray::TrayIcon,
     hotkey: hotkey::HotkeyManager,
     thumb_stack: thumbnail::ThumbnailStack,
+    history: history::HistoryManager,
     settings_hwnd: Option<HWND>,
 }
 
@@ -37,6 +40,132 @@ unsafe fn open_or_focus_settings(main_hwnd: HWND, ctx: &mut AppContext) {
         }
     }
     ctx.settings_hwnd = settings::open_settings_window(main_hwnd, &ctx.config);
+}
+
+fn capture_region_screenshot(hwnd: HWND, ctx: &mut AppContext) {
+    match capture::CapturedFrame::capture() {
+        Ok(frame) => {
+            let selected_rect = overlay::run_overlay(&frame);
+            if let Some(rect) = selected_rect {
+                if let Some((rgba, w, h)) = frame.crop_to_rgba(rect) {
+                    match storage::save_png_to_dir(&ctx.config.save_directory, &rgba, w, h) {
+                        Ok((saved_path, png_bytes)) => {
+                            let _ = clipboard::write_image(
+                                Some(hwnd),
+                                &rgba,
+                                w,
+                                h,
+                                &png_bytes,
+                            );
+
+                            ctx.thumb_stack.push(
+                                hwnd,
+                                saved_path.clone(),
+                                &rgba,
+                                w,
+                                h,
+                                ctx.config.thumbnail_lifespan_secs,
+                            );
+
+                            ctx.history.push(saved_path.clone(), &rgba, w, h);
+
+                            let msg = format!("Saved region screenshot: {}\n", saved_path.display());
+                            let msg_w: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
+                            unsafe {
+                                windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
+                                    PCWSTR(msg_w.as_ptr()),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            let err_msg = format!("Failed to save screenshot: {e}\n");
+                            let err_w: Vec<u16> = err_msg.encode_utf16().chain(std::iter::once(0)).collect();
+                            unsafe {
+                                windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
+                                    PCWSTR(err_w.as_ptr()),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let err_msg = format!("Capture failed: {e}\n");
+            let err_w: Vec<u16> = err_msg.encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe {
+                windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
+                    PCWSTR(err_w.as_ptr()),
+                );
+            }
+        }
+    }
+}
+
+fn capture_fullscreen_screenshot(hwnd: HWND, ctx: &mut AppContext) {
+    match capture::CapturedFrame::capture() {
+        Ok(frame) => {
+            unsafe {
+                // Find monitor holding cursor
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+                let mut mi = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                let _ = GetMonitorInfoW(hmon, &mut mi);
+                let rect = mi.rcMonitor;
+
+                if let Some((rgba, w, h)) = frame.crop_to_rgba(rect) {
+                    match storage::save_png_to_dir(&ctx.config.save_directory, &rgba, w, h) {
+                        Ok((saved_path, png_bytes)) => {
+                            let _ = clipboard::write_image(
+                                Some(hwnd),
+                                &rgba,
+                                w,
+                                h,
+                                &png_bytes,
+                            );
+
+                            ctx.thumb_stack.push(
+                                hwnd,
+                                saved_path.clone(),
+                                &rgba,
+                                w,
+                                h,
+                                ctx.config.thumbnail_lifespan_secs,
+                            );
+
+                            ctx.history.push(saved_path.clone(), &rgba, w, h);
+
+                            let msg = format!("Saved fullscreen screenshot: {}\n", saved_path.display());
+                            let msg_w: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
+                            windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
+                                PCWSTR(msg_w.as_ptr()),
+                            );
+                        }
+                        Err(e) => {
+                            let err_msg = format!("Failed to save screenshot: {e}\n");
+                            let err_w: Vec<u16> = err_msg.encode_utf16().chain(std::iter::once(0)).collect();
+                            windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
+                                PCWSTR(err_w.as_ptr()),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let err_msg = format!("Fullscreen capture failed: {e}\n");
+            let err_w: Vec<u16> = err_msg.encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe {
+                windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
+                    PCWSTR(err_w.as_ptr()),
+                );
+            }
+        }
+    }
 }
 
 unsafe extern "system" fn wndproc(
@@ -71,76 +200,65 @@ unsafe extern "system" fn wndproc(
             if !ctx_ptr.is_null() {
                 let new_cfg = *Box::from_raw(wparam.0 as *mut config::AppConfig);
                 let ctx = &mut *ctx_ptr;
-                if new_cfg.hotkey_modifiers != ctx.hotkey.modifiers || new_cfg.hotkey_vk != ctx.hotkey.vk {
-                    match ctx.hotkey.rebind(new_cfg.hotkey_modifiers, new_cfg.hotkey_vk) {
-                        Ok(()) => {
-                            let tip = format!("Snapdock ({})\0", hotkey::format_hotkey(new_cfg.hotkey_modifiers, new_cfg.hotkey_vk));
-                            ctx.tray_icon.update_tip(&tip);
-                        }
-                        Err(err_msg) => {
-                            ctx.tray_icon.show_balloon("Hotkey Conflict", &err_msg);
-                        }
+
+                if new_cfg.region_hotkey_modifiers != ctx.hotkey.region.modifiers
+                    || new_cfg.region_hotkey_vk != ctx.hotkey.region.vk
+                {
+                    if let Err(e) = ctx.hotkey.rebind_region(
+                        new_cfg.region_hotkey_modifiers,
+                        new_cfg.region_hotkey_vk,
+                    ) {
+                        ctx.tray_icon.show_balloon("Hotkey Conflict", &e);
                     }
                 }
+
+                if new_cfg.fullscreen_hotkey_modifiers != ctx.hotkey.fullscreen.modifiers
+                    || new_cfg.fullscreen_hotkey_vk != ctx.hotkey.fullscreen.vk
+                {
+                    if let Err(e) = ctx.hotkey.rebind_fullscreen(
+                        new_cfg.fullscreen_hotkey_modifiers,
+                        new_cfg.fullscreen_hotkey_vk,
+                    ) {
+                        ctx.tray_icon.show_balloon("Hotkey Conflict", &e);
+                    }
+                }
+
+                if new_cfg.history_hotkey_modifiers != ctx.hotkey.history.modifiers
+                    || new_cfg.history_hotkey_vk != ctx.hotkey.history.vk
+                {
+                    if let Err(e) = ctx.hotkey.rebind_history(
+                        new_cfg.history_hotkey_modifiers,
+                        new_cfg.history_hotkey_vk,
+                    ) {
+                        ctx.tray_icon.show_balloon("Hotkey Conflict", &e);
+                    }
+                }
+
+                let tip = format!(
+                    "Snapdock (Region: {}, Full: {})\0",
+                    hotkey::format_hotkey(new_cfg.region_hotkey_modifiers, new_cfg.region_hotkey_vk),
+                    hotkey::format_hotkey(new_cfg.fullscreen_hotkey_modifiers, new_cfg.fullscreen_hotkey_vk),
+                );
+                ctx.tray_icon.update_tip(&tip);
                 ctx.config = new_cfg;
             }
             LRESULT(0)
         }
         WM_HOTKEY => {
-            if wparam.0 as i32 == hotkey::SNAPDOCK_HOTKEY_ID {
-                let ctx_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppContext;
-                if !ctx_ptr.is_null() {
-                    match capture::CapturedFrame::capture() {
-                        Ok(frame) => {
-                            let selected_rect = overlay::run_overlay(&frame);
-                            if let Some(rect) = selected_rect {
-                                if let Some((rgba, w, h)) = frame.crop_to_rgba(rect) {
-                                    match storage::save_png_to_dir(&(*ctx_ptr).config.save_directory, &rgba, w, h) {
-                                        Ok((saved_path, png_bytes)) => {
-                                            // Write to clipboard (CF_DIBV5 + registered PNG)
-                                            let _ = clipboard::write_image(
-                                                Some(hwnd),
-                                                &rgba,
-                                                w,
-                                                h,
-                                                &png_bytes,
-                                            );
-
-                                            // Push to floating thumbnail stack
-                                            (*ctx_ptr).thumb_stack.push(
-                                                hwnd,
-                                                saved_path.clone(),
-                                                &rgba,
-                                                w,
-                                                h,
-                                                (*ctx_ptr).config.thumbnail_lifespan_secs,
-                                            );
-
-                                            let msg = format!("Saved screenshot: {}\n", saved_path.display());
-                                            let msg_w: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
-                                            windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
-                                                PCWSTR(msg_w.as_ptr()),
-                                            );
-                                        }
-                                        Err(e) => {
-                                            let err_msg = format!("Failed to save screenshot: {e}\n");
-                                            let err_w: Vec<u16> = err_msg.encode_utf16().chain(std::iter::once(0)).collect();
-                                            windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
-                                                PCWSTR(err_w.as_ptr()),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let err_msg = format!("Capture failed: {e}\n");
-                            let err_w: Vec<u16> = err_msg.encode_utf16().chain(std::iter::once(0)).collect();
-                            windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
-                                PCWSTR(err_w.as_ptr()),
-                            );
-                        }
+            let id = wparam.0 as i32;
+            let ctx_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppContext;
+            if !ctx_ptr.is_null() {
+                match id {
+                    hotkey::SNAPDOCK_HOTKEY_REGION_ID => {
+                        capture_region_screenshot(hwnd, &mut *ctx_ptr);
                     }
+                    hotkey::SNAPDOCK_HOTKEY_FULLSCREEN_ID => {
+                        capture_fullscreen_screenshot(hwnd, &mut *ctx_ptr);
+                    }
+                    hotkey::SNAPDOCK_HOTKEY_HISTORY_ID => {
+                        (*ctx_ptr).history.toggle_sidebar(hwnd);
+                    }
+                    _ => {}
                 }
             }
             LRESULT(0)
@@ -148,11 +266,26 @@ unsafe extern "system" fn wndproc(
         WM_COMMAND => {
             let id = (wparam.0 & 0xffff) as usize;
             let ctx_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppContext;
-            if id == tray::IDM_SETTINGS && !ctx_ptr.is_null() {
-                open_or_focus_settings(hwnd, &mut *ctx_ptr);
-            } else if id == tray::IDM_QUIT {
-                RUNNING.store(false, Ordering::SeqCst);
-                let _ = DestroyWindow(hwnd);
+            if !ctx_ptr.is_null() {
+                match id {
+                    tray::IDM_REGION_CAPTURE => {
+                        capture_region_screenshot(hwnd, &mut *ctx_ptr);
+                    }
+                    tray::IDM_FULLSCREEN_CAPTURE => {
+                        capture_fullscreen_screenshot(hwnd, &mut *ctx_ptr);
+                    }
+                    tray::IDM_HISTORY => {
+                        (*ctx_ptr).history.toggle_sidebar(hwnd);
+                    }
+                    tray::IDM_SETTINGS => {
+                        open_or_focus_settings(hwnd, &mut *ctx_ptr);
+                    }
+                    tray::IDM_QUIT => {
+                        RUNNING.store(false, Ordering::SeqCst);
+                        let _ = DestroyWindow(hwnd);
+                    }
+                    _ => {}
+                }
             }
             LRESULT(0)
         }
@@ -181,7 +314,6 @@ fn main() -> Result<()> {
     let _mutex = unsafe {
         let m = CreateMutexW(None, true, w!("Local\\Snapdock_SingleInstance_Mutex"))?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            // A second launch exits silently
             let _ = CloseHandle(m);
             return Ok(());
         }
@@ -223,13 +355,25 @@ fn main() -> Result<()> {
 
         let cfg = config::AppConfig::load();
         let mut tray_icon = tray::TrayIcon::new(hwnd);
-        let tip = format!("Snapdock ({})\0", hotkey::format_hotkey(cfg.hotkey_modifiers, cfg.hotkey_vk));
+        let tip = format!(
+            "Snapdock (Region: {}, Full: {})\0",
+            hotkey::format_hotkey(cfg.region_hotkey_modifiers, cfg.region_hotkey_vk),
+            hotkey::format_hotkey(cfg.fullscreen_hotkey_modifiers, cfg.fullscreen_hotkey_vk),
+        );
         tray_icon.update_tip(&tip);
 
-        let (hotkey, hotkey_result) = hotkey::HotkeyManager::new(hwnd, cfg.hotkey_modifiers, cfg.hotkey_vk);
+        let (hotkey, hotkey_warnings) = hotkey::HotkeyManager::new(
+            hwnd,
+            cfg.region_hotkey_modifiers,
+            cfg.region_hotkey_vk,
+            cfg.fullscreen_hotkey_modifiers,
+            cfg.fullscreen_hotkey_vk,
+            cfg.history_hotkey_modifiers,
+            cfg.history_hotkey_vk,
+        );
 
-        if let Err(err_msg) = hotkey_result {
-            tray_icon.show_balloon("Hotkey Conflict", &err_msg);
+        for warning in hotkey_warnings {
+            tray_icon.show_balloon("Hotkey Conflict", &warning);
         }
 
         let mut ctx = AppContext {
@@ -237,6 +381,7 @@ fn main() -> Result<()> {
             tray_icon,
             hotkey,
             thumb_stack: thumbnail::ThumbnailStack::new(),
+            history: history::HistoryManager::new(),
             settings_hwnd: None,
         };
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut ctx as *mut _ as isize);

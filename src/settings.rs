@@ -15,8 +15,17 @@ use crate::hotkey::format_hotkey;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordingTarget {
+    Region,
+    Fullscreen,
+    History,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ButtonId {
-    ChangeHotkey,
+    ChangeRegionHotkey,
+    ChangeFullscreenHotkey,
+    ChangeHistoryHotkey,
     LifespanInfinite,
     LifespanTimed,
     LifespanDisabled,
@@ -39,12 +48,19 @@ struct SettingsState {
     main_hwnd: HWND,
     _current_config: AppConfig,
 
-    pending_modifiers: u32,
-    pending_vk: u32,
+    pending_region_mods: u32,
+    pending_region_vk: u32,
+
+    pending_fullscreen_mods: u32,
+    pending_fullscreen_vk: u32,
+
+    pending_history_mods: u32,
+    pending_history_vk: u32,
+
     pending_lifespan: LifespanMode,
     pending_save_dir: PathBuf,
 
-    recording_hotkey: bool,
+    recording_target: Option<RecordingTarget>,
     hovered_button: Option<ButtonId>,
 
     font_title: HFONT,
@@ -65,16 +81,20 @@ impl SettingsState {
             let font_title = create_font(18, 700);
             let font_section = create_font(14, 600);
             let font_body = create_font(13, 400);
-            let font_badge = create_font(14, 600);
+            let font_badge = create_font(13, 600);
 
             Self {
                 main_hwnd,
                 _current_config: cfg.clone(),
-                pending_modifiers: cfg.hotkey_modifiers,
-                pending_vk: cfg.hotkey_vk,
+                pending_region_mods: cfg.region_hotkey_modifiers,
+                pending_region_vk: cfg.region_hotkey_vk,
+                pending_fullscreen_mods: cfg.fullscreen_hotkey_modifiers,
+                pending_fullscreen_vk: cfg.fullscreen_hotkey_vk,
+                pending_history_mods: cfg.history_hotkey_modifiers,
+                pending_history_vk: cfg.history_hotkey_vk,
                 pending_lifespan: lifespan_mode,
                 pending_save_dir: cfg.save_directory.clone(),
-                recording_hotkey: false,
+                recording_target: None,
                 hovered_button: None,
                 font_title,
                 font_section,
@@ -148,30 +168,38 @@ pub fn pick_folder(parent: HWND) -> Option<PathBuf> {
     }
 }
 
-// Layout coordinate constants (Window width = 520, height = 540)
-const WIN_W: i32 = 520;
-const WIN_H: i32 = 540;
+// Layout coordinate constants (Window width = 560, height = 680)
+const WIN_W: i32 = 560;
+const WIN_H: i32 = 680;
 
-// Button Hitbox Rectangles
-const RECT_CHANGE_HOTKEY: RECT = RECT { left: 340, top: 62, right: 470, bottom: 98 };
+// Hitbox Rectangles
+const RECT_CHANGE_REGION: RECT = RECT { left: 405, top: 76, right: 520, bottom: 108 };
+const RECT_CHANGE_FULLSCREEN: RECT = RECT { left: 405, top: 121, right: 520, bottom: 153 };
+const RECT_CHANGE_HISTORY: RECT = RECT { left: 405, top: 166, right: 520, bottom: 198 };
 
-const RECT_LIFESPAN_INF: RECT = RECT { left: 40, top: 180, right: 180, bottom: 215 };
-const RECT_LIFESPAN_TIMED: RECT = RECT { left: 190, top: 180, right: 300, bottom: 215 };
-const RECT_LIFESPAN_DIS: RECT = RECT { left: 310, top: 180, right: 430, bottom: 215 };
+const RECT_LIFESPAN_INF: RECT = RECT { left: 40, top: 310, right: 180, bottom: 345 };
+const RECT_LIFESPAN_TIMED: RECT = RECT { left: 195, top: 310, right: 305, bottom: 345 };
+const RECT_LIFESPAN_DIS: RECT = RECT { left: 320, top: 310, right: 440, bottom: 345 };
 
-const RECT_LIFESPAN_DEC: RECT = RECT { left: 190, top: 225, right: 225, bottom: 255 };
-const RECT_LIFESPAN_INC: RECT = RECT { left: 315, top: 225, right: 350, bottom: 255 };
+const RECT_LIFESPAN_DEC: RECT = RECT { left: 195, top: 355, right: 230, bottom: 385 };
+const RECT_LIFESPAN_INC: RECT = RECT { left: 330, top: 355, right: 365, bottom: 385 };
 
-const RECT_BROWSE_FOLDER: RECT = RECT { left: 40, top: 380, right: 150, bottom: 412 };
-const RECT_OPEN_FOLDER: RECT = RECT { left: 160, top: 380, right: 270, bottom: 412 };
+const RECT_BROWSE_FOLDER: RECT = RECT { left: 40, top: 512, right: 150, bottom: 544 };
+const RECT_OPEN_FOLDER: RECT = RECT { left: 160, top: 512, right: 270, bottom: 544 };
 
-const RECT_SAVE_APPLY: RECT = RECT { left: 260, top: 460, right: 390, bottom: 498 };
-const RECT_CANCEL: RECT = RECT { left: 405, top: 460, right: 480, bottom: 498 };
+const RECT_SAVE_APPLY: RECT = RECT { left: 280, top: 590, right: 425, bottom: 630 };
+const RECT_CANCEL: RECT = RECT { left: 440, top: 590, right: 520, bottom: 630 };
 
 fn hit_test(pt: POINT) -> Option<ButtonId> {
     unsafe {
-        if PtInRect(&RECT_CHANGE_HOTKEY, pt).as_bool() {
-            return Some(ButtonId::ChangeHotkey);
+        if PtInRect(&RECT_CHANGE_REGION, pt).as_bool() {
+            return Some(ButtonId::ChangeRegionHotkey);
+        }
+        if PtInRect(&RECT_CHANGE_FULLSCREEN, pt).as_bool() {
+            return Some(ButtonId::ChangeFullscreenHotkey);
+        }
+        if PtInRect(&RECT_CHANGE_HISTORY, pt).as_bool() {
+            return Some(ButtonId::ChangeHistoryHotkey);
         }
         if PtInRect(&RECT_LIFESPAN_INF, pt).as_bool() {
             return Some(ButtonId::LifespanInfinite);
@@ -251,63 +279,107 @@ unsafe fn paint_settings(hwnd: HWND, state: &SettingsState) {
     let mem_bmp = CreateCompatibleBitmap(hdc, cr.right, cr.bottom);
     let old_bmp = SelectObject(mem_dc, HGDIOBJ(mem_bmp.0));
 
-    // Fill main dark background
+    // Fill background
     let bg_brush = CreateSolidBrush(COLOR_BG);
     FillRect(mem_dc, &cr, bg_brush);
     let _ = DeleteObject(HGDIOBJ(bg_brush.0));
 
     let _ = SetBkMode(mem_dc, TRANSPARENT);
 
-    // --- CARD 1: HOTKEY ---
-    let card1 = RECT { left: 24, top: 20, right: cr.right - 24, bottom: 120 };
+    // --- CARD 1: KEYBOARD SHORTCUTS ---
+    let card1 = RECT { left: 24, top: 16, right: cr.right - 24, bottom: 250 };
     draw_rounded_card(mem_dc, &card1, COLOR_CARD, COLOR_CARD_BORDER);
 
     let old_font = SelectObject(mem_dc, HGDIOBJ(state.font_section.0));
     SetTextColor(mem_dc, COLOR_TEXT_WHITE);
-    let mut t1: Vec<u16> = "CAPTURE SHORTCUT\0".encode_utf16().collect();
-    let mut r1 = RECT { left: 40, top: 32, right: 300, bottom: 52 };
+    let mut t1: Vec<u16> = "KEYBOARD SHORTCUTS\0".encode_utf16().collect();
+    let mut r1 = RECT { left: 40, top: 28, right: 300, bottom: 48 };
     DrawTextW(mem_dc, &mut t1, &mut r1, DT_LEFT | DT_SINGLELINE);
 
     SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
     SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-    let mut sub1: Vec<u16> = "Global key combination to freeze and crop screen\0".encode_utf16().collect();
-    let mut r_sub1 = RECT { left: 40, top: 54, right: 330, bottom: 74 };
+    let mut sub1: Vec<u16> = "Global hotkeys to trigger capture actions and history\0".encode_utf16().collect();
+    let mut r_sub1 = RECT { left: 40, top: 48, right: 460, bottom: 68 };
     DrawTextW(mem_dc, &mut sub1, &mut r_sub1, DT_LEFT | DT_SINGLELINE);
 
-    // Hotkey display badge
-    let hotkey_str = format_hotkey(state.pending_modifiers, state.pending_vk);
-    let badge_rect = RECT { left: 40, top: 76, right: 240, bottom: 108 };
-    draw_rounded_card(mem_dc, &badge_rect, COLOR_BG, COLOR_PRIMARY);
-    SelectObject(mem_dc, HGDIOBJ(state.font_badge.0));
+    // Row 1: Region Capture
+    SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
     SetTextColor(mem_dc, COLOR_TEXT_WHITE);
-    let mut hk_w: Vec<u16> = format!("{hotkey_str}\0").encode_utf16().collect();
-    let mut r_hk = badge_rect;
-    DrawTextW(mem_dc, &mut hk_w, &mut r_hk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    let mut lbl1: Vec<u16> = "Region Capture\0".encode_utf16().collect();
+    let mut r_lbl1 = RECT { left: 40, top: 82, right: 200, bottom: 104 };
+    DrawTextW(mem_dc, &mut lbl1, &mut r_lbl1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    // Change Button
-    let (chg_text, chg_bg, chg_border) = if state.recording_hotkey {
-        ("Press keys...", COLOR_AMBER, COLOR_AMBER)
-    } else if state.hovered_button == Some(ButtonId::ChangeHotkey) {
-        ("Change...", COLOR_BTN_HOVER, COLOR_PRIMARY_HOVER)
-    } else {
-        ("Change...", COLOR_BTN_BG, COLOR_CARD_BORDER)
-    };
-    draw_button(mem_dc, &RECT_CHANGE_HOTKEY, chg_text, state.font_section, chg_bg, COLOR_TEXT_WHITE, chg_border);
+    let reg_badge_rect = RECT { left: 200, top: 76, right: 395, bottom: 108 };
+    draw_rounded_card(mem_dc, &reg_badge_rect, COLOR_BG, COLOR_PRIMARY);
+    SelectObject(mem_dc, HGDIOBJ(state.font_badge.0));
+    let reg_hk_str = format_hotkey(state.pending_region_mods, state.pending_region_vk);
+    let mut reg_hk_w: Vec<u16> = format!("{reg_hk_str}\0").encode_utf16().collect();
+    let mut r_rhk = reg_badge_rect;
+    DrawTextW(mem_dc, &mut reg_hk_w, &mut r_rhk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    let is_rec_reg = state.recording_target == Some(RecordingTarget::Region);
+    let (reg_btn_txt, reg_btn_bg) = if is_rec_reg { ("Press keys...", COLOR_AMBER) } else if state.hovered_button == Some(ButtonId::ChangeRegionHotkey) { ("Change...", COLOR_BTN_HOVER) } else { ("Change...", COLOR_BTN_BG) };
+    draw_button(mem_dc, &RECT_CHANGE_REGION, reg_btn_txt, state.font_section, reg_btn_bg, COLOR_TEXT_WHITE, if is_rec_reg { COLOR_AMBER } else { COLOR_CARD_BORDER });
+
+    // Row 2: Full Screen Capture
+    SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
+    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
+    let mut lbl2: Vec<u16> = "Full Screen\0".encode_utf16().collect();
+    let mut r_lbl2 = RECT { left: 40, top: 127, right: 200, bottom: 149 };
+    DrawTextW(mem_dc, &mut lbl2, &mut r_lbl2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    let fs_badge_rect = RECT { left: 200, top: 121, right: 395, bottom: 153 };
+    draw_rounded_card(mem_dc, &fs_badge_rect, COLOR_BG, COLOR_PRIMARY);
+    SelectObject(mem_dc, HGDIOBJ(state.font_badge.0));
+    let fs_hk_str = format_hotkey(state.pending_fullscreen_mods, state.pending_fullscreen_vk);
+    let mut fs_hk_w: Vec<u16> = format!("{fs_hk_str}\0").encode_utf16().collect();
+    let mut r_fshk = fs_badge_rect;
+    DrawTextW(mem_dc, &mut fs_hk_w, &mut r_fshk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    let is_rec_fs = state.recording_target == Some(RecordingTarget::Fullscreen);
+    let (fs_btn_txt, fs_btn_bg) = if is_rec_fs { ("Press keys...", COLOR_AMBER) } else if state.hovered_button == Some(ButtonId::ChangeFullscreenHotkey) { ("Change...", COLOR_BTN_HOVER) } else { ("Change...", COLOR_BTN_BG) };
+    draw_button(mem_dc, &RECT_CHANGE_FULLSCREEN, fs_btn_txt, state.font_section, fs_btn_bg, COLOR_TEXT_WHITE, if is_rec_fs { COLOR_AMBER } else { COLOR_CARD_BORDER });
+
+    // Row 3: History Sidebar
+    SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
+    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
+    let mut lbl3: Vec<u16> = "History Sidebar\0".encode_utf16().collect();
+    let mut r_lbl3 = RECT { left: 40, top: 172, right: 200, bottom: 194 };
+    DrawTextW(mem_dc, &mut lbl3, &mut r_lbl3, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    let hist_badge_rect = RECT { left: 200, top: 166, right: 395, bottom: 198 };
+    draw_rounded_card(mem_dc, &hist_badge_rect, COLOR_BG, COLOR_PRIMARY);
+    SelectObject(mem_dc, HGDIOBJ(state.font_badge.0));
+    let hist_hk_str = format_hotkey(state.pending_history_mods, state.pending_history_vk);
+    let mut hist_hk_w: Vec<u16> = format!("{hist_hk_str}\0").encode_utf16().collect();
+    let mut r_histhk = hist_badge_rect;
+    DrawTextW(mem_dc, &mut hist_hk_w, &mut r_histhk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    let is_rec_hist = state.recording_target == Some(RecordingTarget::History);
+    let (hist_btn_txt, hist_btn_bg) = if is_rec_hist { ("Press keys...", COLOR_AMBER) } else if state.hovered_button == Some(ButtonId::ChangeHistoryHotkey) { ("Change...", COLOR_BTN_HOVER) } else { ("Change...", COLOR_BTN_BG) };
+    draw_button(mem_dc, &RECT_CHANGE_HISTORY, hist_btn_txt, state.font_section, hist_btn_bg, COLOR_TEXT_WHITE, if is_rec_hist { COLOR_AMBER } else { COLOR_CARD_BORDER });
+
+    // Bottom note in Card 1
+    SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
+    SetTextColor(mem_dc, COLOR_TEXT_MUTED);
+    let mut note1: Vec<u16> = "Press any key combination while recording. Esc cancels.\0".encode_utf16().collect();
+    let mut r_note1 = RECT { left: 40, top: 218, right: 500, bottom: 238 };
+    DrawTextW(mem_dc, &mut note1, &mut r_note1, DT_LEFT | DT_SINGLELINE);
 
     // --- CARD 2: FLOATING THUMBNAIL LIFESPAN ---
-    let card2 = RECT { left: 24, top: 135, right: cr.right - 24, bottom: 275 };
+    let card2 = RECT { left: 24, top: 265, right: cr.right - 24, bottom: 405 };
     draw_rounded_card(mem_dc, &card2, COLOR_CARD, COLOR_CARD_BORDER);
 
     SelectObject(mem_dc, HGDIOBJ(state.font_section.0));
     SetTextColor(mem_dc, COLOR_TEXT_WHITE);
     let mut t2: Vec<u16> = "FLOATING THUMBNAIL\0".encode_utf16().collect();
-    let mut r2 = RECT { left: 40, top: 147, right: 300, bottom: 167 };
+    let mut r2 = RECT { left: 40, top: 277, right: 300, bottom: 297 };
     DrawTextW(mem_dc, &mut t2, &mut r2, DT_LEFT | DT_SINGLELINE);
 
     SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
     SetTextColor(mem_dc, COLOR_TEXT_MUTED);
     let mut sub2: Vec<u16> = "Preview popup at bottom-right corner after capture\0".encode_utf16().collect();
-    let mut r_sub2 = RECT { left: 40, top: 167, right: 460, bottom: 187 };
+    let mut r_sub2 = RECT { left: 40, top: 295, right: 460, bottom: 315 };
     DrawTextW(mem_dc, &mut sub2, &mut r_sub2, DT_LEFT | DT_SINGLELINE);
 
     // Pill: Infinite
@@ -331,12 +403,12 @@ unsafe fn paint_settings(hwnd: HWND, state: &SettingsState) {
     let dis_txt_color = if is_dis { COLOR_TEXT_WHITE } else { COLOR_TEXT_MUTED };
     draw_button(mem_dc, &RECT_LIFESPAN_DIS, "Disable", state.font_body, dis_bg, dis_txt_color, dis_border);
 
-    // Timed stepper controls (visible/active when Timed mode is selected)
+    // Timed stepper controls
     if let LifespanMode::Timed(secs) = state.pending_lifespan {
         let dec_bg = if state.hovered_button == Some(ButtonId::LifespanDec) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
         draw_button(mem_dc, &RECT_LIFESPAN_DEC, "-", state.font_section, dec_bg, COLOR_TEXT_WHITE, COLOR_CARD_BORDER);
 
-        let dur_rect = RECT { left: 230, top: 225, right: 310, bottom: 255 };
+        let dur_rect = RECT { left: 235, top: 355, right: 325, bottom: 385 };
         SelectObject(mem_dc, HGDIOBJ(state.font_section.0));
         SetTextColor(mem_dc, COLOR_TEXT_WHITE);
         let mut dur_w: Vec<u16> = format!("{secs} seconds\0").encode_utf16().collect();
@@ -348,32 +420,31 @@ unsafe fn paint_settings(hwnd: HWND, state: &SettingsState) {
     }
 
     // --- CARD 3: SAVE LOCATION ---
-    let card3 = RECT { left: 24, top: 290, right: cr.right - 24, bottom: 430 };
+    let card3 = RECT { left: 24, top: 420, right: cr.right - 24, bottom: 560 };
     draw_rounded_card(mem_dc, &card3, COLOR_CARD, COLOR_CARD_BORDER);
 
     SelectObject(mem_dc, HGDIOBJ(state.font_section.0));
     SetTextColor(mem_dc, COLOR_TEXT_WHITE);
     let mut t3: Vec<u16> = "SAVE LOCATION\0".encode_utf16().collect();
-    let mut r3 = RECT { left: 40, top: 302, right: 300, bottom: 322 };
+    let mut r3 = RECT { left: 40, top: 432, right: 300, bottom: 452 };
     DrawTextW(mem_dc, &mut t3, &mut r3, DT_LEFT | DT_SINGLELINE);
 
     SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
     SetTextColor(mem_dc, COLOR_TEXT_MUTED);
     let mut sub3: Vec<u16> = "Folder where full-resolution screenshots are saved\0".encode_utf16().collect();
-    let mut r_sub3 = RECT { left: 40, top: 322, right: 460, bottom: 342 };
+    let mut r_sub3 = RECT { left: 40, top: 452, right: 460, bottom: 472 };
     DrawTextW(mem_dc, &mut sub3, &mut r_sub3, DT_LEFT | DT_SINGLELINE);
 
     // Path display box
-    let path_rect = RECT { left: 40, top: 344, right: cr.right - 40, bottom: 372 };
+    let path_rect = RECT { left: 40, top: 474, right: cr.right - 40, bottom: 502 };
     draw_rounded_card(mem_dc, &path_rect, COLOR_BG, COLOR_CARD_BORDER);
     SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
     SetTextColor(mem_dc, COLOR_TEXT_WHITE);
     let path_str = state.pending_save_dir.to_string_lossy();
     let mut path_w: Vec<u16> = format!("{path_str}\0").encode_utf16().collect();
-    let mut r_path = RECT { left: 50, top: 344, right: cr.right - 50, bottom: 372 };
+    let mut r_path = RECT { left: 50, top: 474, right: cr.right - 50, bottom: 502 };
     DrawTextW(mem_dc, &mut path_w, &mut r_path, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
 
-    // Browse and Open buttons
     let browse_bg = if state.hovered_button == Some(ButtonId::BrowseFolder) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
     draw_button(mem_dc, &RECT_BROWSE_FOLDER, "Browse...", state.font_body, browse_bg, COLOR_TEXT_WHITE, COLOR_CARD_BORDER);
 
@@ -458,12 +529,11 @@ unsafe extern "system" fn settings_wndproc(
             LRESULT(0)
         }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
-            if state.recording_hotkey {
+            if let Some(target) = state.recording_target {
                 let vk = wparam.0 as u32;
 
-                // Escape cancels recording
-                if vk == 0x1B {
-                    state.recording_hotkey = false;
+                if vk == 0x1B { // Esc cancels recording
+                    state.recording_target = None;
                     let _ = InvalidateRect(Some(hwnd), None, false);
                     return LRESULT(0);
                 }
@@ -486,13 +556,25 @@ unsafe extern "system" fn settings_wndproc(
                         mods |= MOD_WIN.0;
                     }
 
-                    // Must have at least one modifier unless it's a function key (F1-F24) or PrintScreen
                     let is_f_key = (0x70..=0x87).contains(&vk);
                     let is_prt_scr = vk == 0x2C;
-                    if mods != 0 || is_f_key || is_prt_scr {
-                        state.pending_modifiers = mods;
-                        state.pending_vk = vk;
-                        state.recording_hotkey = false;
+                    let is_space = vk == 0x20;
+                    if mods != 0 || is_f_key || is_prt_scr || is_space {
+                        match target {
+                            RecordingTarget::Region => {
+                                state.pending_region_mods = mods;
+                                state.pending_region_vk = vk;
+                            }
+                            RecordingTarget::Fullscreen => {
+                                state.pending_fullscreen_mods = mods;
+                                state.pending_fullscreen_vk = vk;
+                            }
+                            RecordingTarget::History => {
+                                state.pending_history_mods = mods;
+                                state.pending_history_vk = vk;
+                            }
+                        }
+                        state.recording_target = None;
                         let _ = InvalidateRect(Some(hwnd), None, false);
                     }
                 }
@@ -506,8 +588,16 @@ unsafe extern "system" fn settings_wndproc(
             let pt = POINT { x, y };
 
             match hit_test(pt) {
-                Some(ButtonId::ChangeHotkey) => {
-                    state.recording_hotkey = !state.recording_hotkey;
+                Some(ButtonId::ChangeRegionHotkey) => {
+                    state.recording_target = if state.recording_target == Some(RecordingTarget::Region) { None } else { Some(RecordingTarget::Region) };
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                Some(ButtonId::ChangeFullscreenHotkey) => {
+                    state.recording_target = if state.recording_target == Some(RecordingTarget::Fullscreen) { None } else { Some(RecordingTarget::Fullscreen) };
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                Some(ButtonId::ChangeHistoryHotkey) => {
+                    state.recording_target = if state.recording_target == Some(RecordingTarget::History) { None } else { Some(RecordingTarget::History) };
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 Some(ButtonId::LifespanInfinite) => {
@@ -556,7 +646,6 @@ unsafe extern "system" fn settings_wndproc(
                     );
                 }
                 Some(ButtonId::SaveApply) => {
-                    // Update AppConfig
                     let lifespan_opt = match state.pending_lifespan {
                         LifespanMode::Infinite => None,
                         LifespanMode::Disabled => Some(0),
@@ -564,20 +653,22 @@ unsafe extern "system" fn settings_wndproc(
                     };
 
                     let new_cfg = AppConfig {
-                        hotkey_modifiers: state.pending_modifiers,
-                        hotkey_vk: state.pending_vk,
+                        region_hotkey_modifiers: state.pending_region_mods,
+                        region_hotkey_vk: state.pending_region_vk,
+                        fullscreen_hotkey_modifiers: state.pending_fullscreen_mods,
+                        fullscreen_hotkey_vk: state.pending_fullscreen_vk,
+                        history_hotkey_modifiers: state.pending_history_mods,
+                        history_hotkey_vk: state.pending_history_vk,
                         thumbnail_lifespan_secs: lifespan_opt,
                         save_directory: state.pending_save_dir.clone(),
                     };
 
-                    // Save to %APPDATA%\Snapdock\config.json
                     if let Err(e) = new_cfg.save() {
                         let msg: Vec<u16> = format!("Failed to save config: {e}\0").encode_utf16().collect();
                         MessageBoxW(Some(hwnd), PCWSTR(msg.as_ptr()), w!("Error"), MB_ICONERROR);
                         return LRESULT(0);
                     }
 
-                    // Notify main window to update its active config and rebind hotkey
                     let boxed = Box::new(new_cfg);
                     let ptr = Box::into_raw(boxed);
                     let _ = SendMessageW(
@@ -593,8 +684,8 @@ unsafe extern "system" fn settings_wndproc(
                     let _ = DestroyWindow(hwnd);
                 }
                 None => {
-                    if state.recording_hotkey {
-                        state.recording_hotkey = false;
+                    if state.recording_target.is_some() {
+                        state.recording_target = None;
                         let _ = InvalidateRect(Some(hwnd), None, false);
                     }
                 }
@@ -602,7 +693,6 @@ unsafe extern "system" fn settings_wndproc(
             LRESULT(0)
         }
         WM_DESTROY => {
-            // Reclaim SettingsState Box
             let _ = Box::from_raw(state_ptr);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             LRESULT(0)
@@ -625,7 +715,6 @@ pub fn open_settings_window(main_hwnd: HWND, cfg: &AppConfig) -> Option<HWND> {
         };
         let _ = RegisterClassW(&wc);
 
-        // Center on screen
         let screen_w = GetSystemMetrics(SM_CXSCREEN);
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
         let x = (screen_w - WIN_W) / 2;
@@ -646,7 +735,6 @@ pub fn open_settings_window(main_hwnd: HWND, cfg: &AppConfig) -> Option<HWND> {
             None,
         ).ok()?;
 
-        // Enable Windows 11 Immersive Dark Mode on titlebar & borders
         let dark_mode: i32 = 1;
         let _ = DwmSetWindowAttribute(
             hwnd,

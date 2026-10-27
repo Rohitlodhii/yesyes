@@ -4,8 +4,11 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::UI::Shell::*;
 
 pub const WM_SNAPDOCK_TRAY: u32 = WM_APP + 1;
-pub const IDM_SETTINGS: usize = 1000;
-pub const IDM_QUIT: usize = 1001;
+pub const IDM_REGION_CAPTURE: usize = 1001;
+pub const IDM_FULLSCREEN_CAPTURE: usize = 1002;
+pub const IDM_HISTORY: usize = 1003;
+pub const IDM_SETTINGS: usize = 1004;
+pub const IDM_QUIT: usize = 1005;
 
 pub struct TrayIcon {
     nid: NOTIFYICONDATAW,
@@ -69,6 +72,10 @@ impl TrayIcon {
     pub fn show_menu(&self, hwnd: HWND) {
         unsafe {
             if let Ok(hmenu) = CreatePopupMenu() {
+                let _ = AppendMenuW(hmenu, MF_STRING, IDM_REGION_CAPTURE, w!("Capture Region"));
+                let _ = AppendMenuW(hmenu, MF_STRING, IDM_FULLSCREEN_CAPTURE, w!("Capture Full Screen"));
+                let _ = AppendMenuW(hmenu, MF_STRING, IDM_HISTORY, w!("Screenshot History"));
+                let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
                 let _ = AppendMenuW(hmenu, MF_STRING, IDM_SETTINGS, w!("Settings..."));
                 let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
                 let _ = AppendMenuW(hmenu, MF_STRING, IDM_QUIT, w!("Quit Snapdock"));

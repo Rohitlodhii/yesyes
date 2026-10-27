@@ -39,6 +39,7 @@ impl TrayIcon {
     pub fn show_balloon(&self, title: &str, message: &str) {
         let mut nid = self.nid;
         nid.uFlags |= NIF_INFO;
+        nid.dwInfoFlags = NIIF_WARNING;
         let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
         let msg_w: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
 

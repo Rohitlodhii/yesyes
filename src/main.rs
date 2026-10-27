@@ -1,5 +1,6 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
+mod hotkey;
 mod tray;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +12,11 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
+struct AppContext {
+    tray_icon: tray::TrayIcon,
+    _hotkey: hotkey::HotkeyManager,
+}
+
 unsafe extern "system" fn wndproc(
     hwnd: HWND,
     msg: u32,
@@ -21,10 +27,19 @@ unsafe extern "system" fn wndproc(
         tray::WM_SNAPDOCK_TRAY => {
             let event = (lparam.0 & 0xffff) as u32;
             if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
-                let tray_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const tray::TrayIcon;
-                if !tray_ptr.is_null() {
-                    (*tray_ptr).show_menu(hwnd);
+                let ctx_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const AppContext;
+                if !ctx_ptr.is_null() {
+                    (*ctx_ptr).tray_icon.show_menu(hwnd);
                 }
+            }
+            LRESULT(0)
+        }
+        WM_HOTKEY => {
+            if wparam.0 as i32 == hotkey::SNAPDOCK_HOTKEY_ID {
+                // Hotkey triggered
+                windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
+                    w!("Snapdock: Hotkey Ctrl+Shift+S triggered\n"),
+                );
             }
             LRESULT(0)
         }
@@ -90,7 +105,17 @@ fn main() -> Result<()> {
         )?;
 
         let tray_icon = tray::TrayIcon::new(hwnd);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, &tray_icon as *const _ as isize);
+        let (_hotkey, hotkey_result) = hotkey::HotkeyManager::new(hwnd);
+
+        if let Err(err_msg) = hotkey_result {
+            tray_icon.show_balloon("Hotkey Conflict", &err_msg);
+        }
+
+        let ctx = AppContext {
+            tray_icon,
+            _hotkey,
+        };
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, &ctx as *const _ as isize);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -98,7 +123,7 @@ fn main() -> Result<()> {
             DispatchMessageW(&msg);
         }
 
-        drop(tray_icon);
+        drop(ctx);
         let _ = CloseHandle(_mutex);
         OleUninitialize();
     }

@@ -1,6 +1,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 mod capture;
+mod clipboard;
 mod hotkey;
 mod overlay;
 mod storage;
@@ -45,7 +46,16 @@ unsafe extern "system" fn wndproc(
                         if let Some(rect) = selected_rect {
                             if let Some((rgba, w, h)) = frame.crop_to_rgba(rect) {
                                 match storage::save_png(&rgba, w, h) {
-                                    Ok((saved_path, _png_bytes)) => {
+                                    Ok((saved_path, png_bytes)) => {
+                                        // Write to clipboard (CF_DIBV5 + registered PNG)
+                                        let _ = clipboard::write_image(
+                                            Some(hwnd),
+                                            &rgba,
+                                            w,
+                                            h,
+                                            &png_bytes,
+                                        );
+
                                         let msg = format!("Saved screenshot: {}\n", saved_path.display());
                                         let msg_w: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
                                         windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(

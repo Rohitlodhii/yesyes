@@ -1,3 +1,4 @@
+#![windows_subsystem = "windows"]
 #![allow(unsafe_op_in_unsafe_fn)]
 
 mod capture;

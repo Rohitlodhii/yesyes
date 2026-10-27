@@ -1,5 +1,6 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
+mod capture;
 mod hotkey;
 mod tray;
 
@@ -36,10 +37,25 @@ unsafe extern "system" fn wndproc(
         }
         WM_HOTKEY => {
             if wparam.0 as i32 == hotkey::SNAPDOCK_HOTKEY_ID {
-                // Hotkey triggered
-                windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
-                    w!("Snapdock: Hotkey Ctrl+Shift+S triggered\n"),
-                );
+                match capture::CapturedFrame::capture() {
+                    Ok(frame) => {
+                        let msg = format!(
+                            "Captured desktop: {}x{} at ({},{})\n",
+                            frame.width, frame.height, frame.vx, frame.vy
+                        );
+                        let msg_w: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
+                        windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
+                            PCWSTR(msg_w.as_ptr()),
+                        );
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Capture failed: {e}\n");
+                        let err_w: Vec<u16> = err_msg.encode_utf16().chain(std::iter::once(0)).collect();
+                        windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(
+                            PCWSTR(err_w.as_ptr()),
+                        );
+                    }
+                }
             }
             LRESULT(0)
         }

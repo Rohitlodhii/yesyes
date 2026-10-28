@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use windows::core::*;
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
@@ -10,6 +11,7 @@ pub const WM_SNAPDOCK_THUMB_DISMISSED: u32 = WM_APP + 2;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_DISMISS_ID: usize = 1;
 const TIMER_ANIM_ID: usize = 2;
+pub const THUMB_CORNER_RADIUS: i32 = 8;
 
 pub struct ThumbnailWindow {
     pub id: usize,
@@ -400,23 +402,40 @@ unsafe extern "system" fn thumb_wndproc(
             start_thumb_exit_anim(hwnd, state);
             LRESULT(0)
         }
+        crate::theme::WM_SETTINGCHANGE | crate::theme::WM_THEMECHANGED => {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            LRESULT(0)
+        }
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
 
+            let radius = THUMB_CORNER_RADIUS
+                .min(state.width / 4)
+                .min(state.height / 4)
+                .max(4);
+            let diameter = radius * 2;
+
+            // Clip drawing to rounded rectangle so the blitted image follows rounded corners
+            let clip_rgn = CreateRoundRectRgn(
+                0,
+                0,
+                state.width + 1,
+                state.height + 1,
+                diameter,
+                diameter,
+            );
+            SelectClipRgn(hdc, Some(clip_rgn));
+
             // Blit downscaled image
             let _ = BitBlt(hdc, 0, 0, state.width, state.height, Some(state.mem_hdc), 0, 0, SRCCOPY);
 
-            // Frame border (subtle 1px border)
-            let border_brush = CreateSolidBrush(COLORREF(0x00404040));
-            let r = RECT {
-                left: 0,
-                top: 0,
-                right: state.width,
-                bottom: state.height,
-            };
-            FrameRect(hdc, &r, border_brush);
-            let _ = DeleteObject(HGDIOBJ(border_brush.0));
+            // Reset clipping
+            SelectClipRgn(hdc, None);
+            let _ = DeleteObject(HGDIOBJ(clip_rgn.0));
+
+            // Rounded border around the thumbnail
+            paint_thumbnail_border(state, hdc, radius);
 
             // Hover UI: buttons bar
             if state.is_hovering {
@@ -441,24 +460,77 @@ unsafe extern "system" fn thumb_wndproc(
 }
 
 fn is_close_button(x: i32, y: i32, w: i32) -> bool {
-    x >= (w - 24) && x <= (w - 4) && y >= 4 && y <= 24
+    x >= (w - 26) && x <= (w - 4) && y >= 4 && y <= 26
 }
 
 fn is_copy_button(x: i32, y: i32) -> bool {
-    x >= 4 && x <= 68 && y >= 4 && y <= 24
+    x >= 4 && x <= 72 && y >= 4 && y <= 26
+}
+
+unsafe fn paint_thumbnail_border(state: &ThumbnailState, hdc: HDC, radius: i32) {
+    let theme = crate::theme::ThemeColors::current();
+    let border_color = if state.is_hovering {
+        theme.card_hover
+    } else if theme.is_dark {
+        // High-contrast clean subtle border for dark mode
+        crate::theme::rgb(85, 90, 100)
+    } else {
+        // Crisp border for light mode
+        crate::theme::rgb(195, 200, 210)
+    };
+
+    let diameter = radius * 2;
+    let pen = CreatePen(PS_SOLID, 1, border_color);
+    let null_brush = GetStockObject(HOLLOW_BRUSH);
+    let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+    let old_brush = SelectObject(hdc, null_brush);
+
+    let _ = RoundRect(
+        hdc,
+        0,
+        0,
+        state.width,
+        state.height,
+        diameter,
+        diameter,
+    );
+
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    let _ = DeleteObject(HGDIOBJ(pen.0));
+}
+
+unsafe fn draw_rounded_badge(hdc: HDC, rect: &RECT, bg: COLORREF, border: COLORREF, radius: i32) {
+    let brush = CreateSolidBrush(bg);
+    let pen = CreatePen(PS_SOLID, 1, border);
+    let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
+    let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+
+    let _ = RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, radius * 2, radius * 2);
+
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    let _ = DeleteObject(HGDIOBJ(brush.0));
+    let _ = DeleteObject(HGDIOBJ(pen.0));
 }
 
 unsafe fn paint_hover_ui(state: &ThumbnailState, hdc: HDC) {
+    let theme = crate::theme::ThemeColors::current();
+
     // Close button (top right): red badge with Fluent vector '✕'
     let close_rect = RECT {
         left: state.width - 24,
-        top: 4,
-        right: state.width - 4,
+        top: 6,
+        right: state.width - 6,
         bottom: 24,
     };
-    let close_bg = CreateSolidBrush(COLORREF(0x003333E5)); // soft red
-    FillRect(hdc, &close_rect, close_bg);
-    let _ = DeleteObject(HGDIOBJ(close_bg.0));
+    draw_rounded_badge(
+        hdc,
+        &close_rect,
+        COLORREF(0x003333E5), // soft red
+        COLORREF(0x002222B5), // border
+        4,
+    );
 
     let _ = SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, COLORREF(0x00FFFFFF));
@@ -467,16 +539,19 @@ unsafe fn paint_hover_ui(state: &ThumbnailState, hdc: HDC) {
     let mut cr = close_rect;
     DrawTextW(hdc, &mut x_text, &mut cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-    // Copy path button (top left): dark badge with Fluent vector icon + text
+    // Copy path button (top left): badge with Fluent vector icon + text
     let copy_rect = RECT {
-        left: 4,
-        top: 4,
-        right: if state.copied_indicator { 68 } else { 56 },
+        left: 6,
+        top: 6,
+        right: if state.copied_indicator { 70 } else { 58 },
         bottom: 24,
     };
-    let copy_bg = CreateSolidBrush(COLORREF(0x00222222));
-    FillRect(hdc, &copy_rect, copy_bg);
-    let _ = DeleteObject(HGDIOBJ(copy_bg.0));
+    let (copy_bg, copy_border) = if theme.is_dark {
+        (COLORREF(0x00222222), COLORREF(0x00444444))
+    } else {
+        (COLORREF(0x00F0F0F0), COLORREF(0x00CCCCCC))
+    };
+    draw_rounded_badge(hdc, &copy_rect, copy_bg, copy_border, 4);
 
     let (icon, label) = if state.copied_indicator {
         (crate::theme::icons::CHECKMARK, "Copied")
@@ -484,15 +559,18 @@ unsafe fn paint_hover_ui(state: &ThumbnailState, hdc: HDC) {
         (crate::theme::icons::COPY, "Path")
     };
 
+    let text_color = if theme.is_dark { COLORREF(0x00FFFFFF) } else { COLORREF(0x00111111) };
+    SetTextColor(hdc, text_color);
+
     // Draw icon
     let mut icon_w: Vec<u16> = icon.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut r_icon = RECT { left: 8, top: 4, right: 22, bottom: 24 };
+    let mut r_icon = RECT { left: 9, top: 6, right: 23, bottom: 24 };
     DrawTextW(hdc, &mut icon_w, &mut r_icon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     // Draw label
     SelectObject(hdc, old_font);
     let mut label_w: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut r_lbl = RECT { left: 24, top: 4, right: copy_rect.right - 4, bottom: 24 };
+    let mut r_lbl = RECT { left: 25, top: 6, right: copy_rect.right - 4, bottom: 24 };
     DrawTextW(hdc, &mut label_w, &mut r_lbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 
@@ -526,6 +604,7 @@ fn create_thumbnail_window(
             hInstance: instance.into(),
             lpszClassName: class_name,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            style: CS_DROPSHADOW,
             ..Default::default()
         };
         let _ = RegisterClassW(&wc);
@@ -624,6 +703,31 @@ fn create_thumbnail_window(
         // Exclude thumbnail from screen capture
         let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
 
+        // Apply rounded window region so corners outside the thumbnail are fully clipped
+        let radius = THUMB_CORNER_RADIUS
+            .min((thumb_w as i32) / 4)
+            .min((thumb_h as i32) / 4)
+            .max(4);
+        let diameter = radius * 2;
+        let rgn = CreateRoundRectRgn(
+            0,
+            0,
+            thumb_w as i32 + 1,
+            thumb_h as i32 + 1,
+            diameter,
+            diameter,
+        );
+        let _ = SetWindowRgn(hwnd, Some(rgn), true);
+
+        // Windows 11 DWM rounded corner preference
+        let preference = DWMWCP_ROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &preference as *const _ as *const _,
+            std::mem::size_of::<u32>() as u32,
+        );
+
         // Initially fully transparent until entry animation starts
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA);
 
@@ -671,4 +775,68 @@ fn downscale_rgba(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) ->
 
 fn start_drag_out(_hwnd: HWND, state: &ThumbnailState) {
     crate::dragout::execute_drag_drop(&state.saved_path, state.hbitmap, state.width, state.height);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_button_hit_testing() {
+        let width = 160;
+        // Close button: right - 26 to right - 4, y: 4..=26
+        assert!(is_close_button(width - 15, 15, width));
+        assert!(is_close_button(width - 26, 4, width));
+        assert!(is_close_button(width - 4, 26, width));
+        assert!(!is_close_button(width - 30, 15, width));
+        assert!(!is_close_button(width - 15, 30, width));
+
+        // Copy button: 4..=72, y: 4..=26
+        assert!(is_copy_button(20, 15));
+        assert!(is_copy_button(4, 4));
+        assert!(is_copy_button(72, 26));
+        assert!(!is_copy_button(75, 15));
+        assert!(!is_copy_button(2, 15));
+        assert!(!is_copy_button(20, 30));
+
+        // Close and Copy buttons do not overlap
+        assert!(!is_close_button(20, 15, width));
+        assert!(!is_copy_button(width - 15, 15));
+    }
+
+    #[test]
+    fn test_thumbnail_corner_radius() {
+        // Standard thumbnail (160x100) -> radius should be 8
+        let r1 = THUMB_CORNER_RADIUS.min(160 / 4).min(100 / 4).max(4);
+        assert_eq!(r1, 8);
+
+        // Very thin ribbon (160x20) -> radius should scale down safely to 5
+        let r2 = THUMB_CORNER_RADIUS.min(160 / 4).min(20 / 4).max(4);
+        assert_eq!(r2, 5);
+
+        // Extremely small -> clamped to at least 4
+        let r3 = THUMB_CORNER_RADIUS.min(10 / 4).min(10 / 4).max(4);
+        assert_eq!(r3, 4);
+    }
+
+    #[test]
+    fn test_rounded_region_creation() {
+        unsafe {
+            let width = 160;
+            let height = 100;
+            let radius = THUMB_CORNER_RADIUS.min(width / 4).min(height / 4).max(4);
+            let diameter = radius * 2;
+            let rgn = CreateRoundRectRgn(0, 0, width + 1, height + 1, diameter, diameter);
+            assert!(!rgn.is_invalid());
+
+            // Center should be in region
+            assert!(PtInRegion(rgn, width / 2, height / 2).as_bool());
+            // Top-left corner (0, 0) should be outside due to rounding
+            assert!(!PtInRegion(rgn, 0, 0).as_bool());
+            // Bottom-right corner (width - 1, height - 1) should be outside due to rounding
+            assert!(!PtInRegion(rgn, width - 1, height - 1).as_bool());
+
+            let _ = DeleteObject(HGDIOBJ(rgn.0));
+        }
+    }
 }

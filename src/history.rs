@@ -20,8 +20,8 @@ const WM_DOCK_UPDATE: u32 = WM_USER + 103;
 pub const DOCK_WIDTH: i32 = 156;
 pub const DOCK_RIGHT_MARGIN: i32 = 16;
 pub const DOCK_CORNER_RADIUS: i32 = 12;
-pub const HEADER_HEIGHT: i32 = 44;
-pub const CARD_HEIGHT: i32 = 114;
+pub const TOOLBAR_HEIGHT: i32 = 44;
+pub const CARD_HEIGHT: i32 = 118;
 pub const CARD_GAP: i32 = 8;
 
 #[derive(Clone)]
@@ -71,9 +71,9 @@ impl HistoryManager {
             st.wHour, st.wMinute, st.wSecond
         );
 
-        // Thumbnail: max 110 px wide, proportional height max 68 px to fit card upper section
-        let thumb_w = 110.min(orig_w).max(40);
-        let thumb_h = (((orig_h as f32 / orig_w as f32) * thumb_w as f32).round() as u32).clamp(24, 68);
+        // Thumbnail: max 114 px wide, proportional height max 66 px to give generous spacing in card
+        let thumb_w = 114.min(orig_w).max(40);
+        let thumb_h = (((orig_h as f32 / orig_w as f32) * thumb_w as f32).round() as u32).clamp(24, 66);
 
         let downscaled = downscale_rgba(rgba, orig_w, orig_h, thumb_w, thumb_h);
 
@@ -232,9 +232,9 @@ fn downscale_rgba(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) ->
 
 pub fn calculate_dock_dimensions(count: usize, work_h: i32) -> (i32, i32) {
     let content_h = if count == 0 {
-        HEADER_HEIGHT + 70 + 8
+        TOOLBAR_HEIGHT + 74 + 16
     } else {
-        HEADER_HEIGHT + (count as i32 * CARD_HEIGHT) + ((count as i32 - 1).max(0) * CARD_GAP) + 10
+        TOOLBAR_HEIGHT + 8 + (count as i32 * CARD_HEIGHT) + ((count as i32 - 1).max(0) * CARD_GAP) + 12
     };
     let max_h = (work_h - 48).max(180);
     let dock_h = content_h.min(max_h);
@@ -264,6 +264,12 @@ struct SidebarAnim {
     h: i32,
 }
 
+struct TooltipState {
+    text: String,
+    theme: ThemeColors,
+    font: HFONT,
+}
+
 struct SidebarState {
     _main_hwnd: HWND,
     history_ptr: *mut HistoryManager,
@@ -273,6 +279,8 @@ struct SidebarState {
     drag_start: Option<(i32, i32, usize)>, // x, y, card index
     anim: Option<SidebarAnim>,
     pub theme: ThemeColors,
+    cur_dock_h: i32,
+    tooltip_hwnd: Option<HWND>,
 
     font_title: HFONT,
     font_bold: HFONT,
@@ -283,7 +291,7 @@ struct SidebarState {
 }
 
 impl SidebarState {
-    fn new(main_hwnd: HWND, history_ptr: *mut HistoryManager) -> Self {
+    fn new(main_hwnd: HWND, history_ptr: *mut HistoryManager, dock_h: i32) -> Self {
         unsafe {
             Self {
                 _main_hwnd: main_hwnd,
@@ -294,6 +302,8 @@ impl SidebarState {
                 drag_start: None,
                 anim: None,
                 theme: ThemeColors::current(),
+                cur_dock_h: dock_h,
+                tooltip_hwnd: None,
                 font_title: create_font(15, 700),
                 font_bold: create_font(13, 600),
                 font_body: create_font(12, 400),
@@ -322,12 +332,13 @@ unsafe fn relayout_dock(hwnd: HWND, state: &mut SidebarState) {
     let work_h = work.bottom - work.top;
 
     let (dock_w, dock_h) = calculate_dock_dimensions(count, work_h);
+    state.cur_dock_h = dock_h;
     let target_x = work.right - DOCK_RIGHT_MARGIN - dock_w;
     let y = work.top + (work_h - dock_h) / 2;
 
     // Clamp scroll
     let total_content_h = count as i32 * (CARD_HEIGHT + CARD_GAP);
-    let visible_h = dock_h - HEADER_HEIGHT;
+    let visible_h = dock_h - TOOLBAR_HEIGHT - 8;
     let max_scroll = (total_content_h - visible_h).max(0);
     state.scroll_y = state.scroll_y.clamp(0, max_scroll);
 
@@ -358,6 +369,9 @@ unsafe fn start_close_animation(hwnd: HWND, state: &mut SidebarState) {
     if state.anim.as_ref().map_or(false, |a| a.is_closing) {
         return;
     }
+    if let Some(tip) = state.tooltip_hwnd {
+        let _ = ShowWindow(tip, SW_HIDE);
+    }
     let mut rect = RECT::default();
     let _ = GetWindowRect(hwnd, &mut rect);
     let work = get_monitor_work_rect(hwnd);
@@ -380,6 +394,9 @@ unsafe fn start_close_animation(hwnd: HWND, state: &mut SidebarState) {
 impl Drop for SidebarState {
     fn drop(&mut self) {
         unsafe {
+            if let Some(tip) = self.tooltip_hwnd {
+                let _ = DestroyWindow(tip);
+            }
             let _ = DeleteObject(HGDIOBJ(self.font_title.0));
             let _ = DeleteObject(HGDIOBJ(self.font_bold.0));
             let _ = DeleteObject(HGDIOBJ(self.font_body.0));
@@ -411,39 +428,44 @@ unsafe fn create_font(size: i32, weight: i32) -> HFONT {
 }
 
 fn hit_test(pt: POINT, state: &SidebarState, count: usize) -> Option<SidebarHit> {
-    // Header controls: Select All, Clear, Close
-    let select_all_rect = RECT { left: 8, top: 9, right: 86, bottom: 35 };
-    let clear_rect = RECT { left: 92, top: 9, right: 118, bottom: 35 };
-    let close_rect = RECT { left: 122, top: 9, right: 148, bottom: 35 };
+    let bar_top = state.cur_dock_h - TOOLBAR_HEIGHT;
 
-    unsafe {
-        if PtInRect(&select_all_rect, pt).as_bool() {
-            return Some(SidebarHit::SelectAllBtn);
-        }
-        if PtInRect(&clear_rect, pt).as_bool() {
-            return Some(SidebarHit::ClearBtn);
-        }
-        if PtInRect(&close_rect, pt).as_bool() {
-            return Some(SidebarHit::CloseBtn);
-        }
-    }
+    // Bottom toolbar controls: Select All, Clear, Close
+    if pt.y >= bar_top {
+        let select_all_rect = RECT { left: 8, top: bar_top + 9, right: 86, bottom: bar_top + 35 };
+        let clear_rect = RECT { left: 92, top: bar_top + 9, right: 118, bottom: bar_top + 35 };
+        let close_rect = RECT { left: 122, top: bar_top + 9, right: 148, bottom: bar_top + 35 };
 
-    if pt.y < HEADER_HEIGHT {
+        unsafe {
+            if PtInRect(&select_all_rect, pt).as_bool() {
+                return Some(SidebarHit::SelectAllBtn);
+            }
+            if PtInRect(&clear_rect, pt).as_bool() {
+                return Some(SidebarHit::ClearBtn);
+            }
+            if PtInRect(&close_rect, pt).as_bool() {
+                return Some(SidebarHit::CloseBtn);
+            }
+        }
         return None;
     }
 
-    let y_in_cards = pt.y - HEADER_HEIGHT + state.scroll_y;
+    if pt.y < 8 {
+        return None;
+    }
+
+    let y_in_cards = pt.y - 8 + state.scroll_y;
     let card_step = CARD_HEIGHT + CARD_GAP;
     let idx = (y_in_cards / card_step) as usize;
 
     if idx < count {
-        let card_top = HEADER_HEIGHT + (idx as i32 * card_step) - state.scroll_y;
+        let card_top = 8 + (idx as i32 * card_step) - state.scroll_y;
         let card_bottom = card_top + CARD_HEIGHT;
 
         if pt.y >= card_top && pt.y <= card_bottom && pt.x >= 8 && pt.x <= DOCK_WIDTH - 8 {
-            // Check button hits within card: y in [card_top + 82, card_top + 106]
-            let btn_top = card_top + 82;
-            let btn_bottom = card_top + 106;
+            // Action button row at bottom of card: y in [card_top + 86, card_top + 110]
+            let btn_top = card_top + 86;
+            let btn_bottom = card_top + 110;
 
             if pt.y >= btn_top && pt.y <= btn_bottom {
                 // Button 1: Open (x: 20..46)
@@ -559,6 +581,163 @@ unsafe fn draw_icon_and_text_btn(
     SelectObject(hdc, old_font);
 }
 
+// Custom native tooltip window procedure
+unsafe extern "system" fn tooltip_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut TooltipState;
+            if !state_ptr.is_null() {
+                let state = &*state_ptr;
+                let mut cr = RECT::default();
+                let _ = GetClientRect(hwnd, &mut cr);
+
+                let bg = if state.theme.is_dark {
+                    theme::rgb(48, 48, 54)
+                } else {
+                    theme::rgb(250, 250, 252)
+                };
+                let border = state.theme.card_border;
+
+                draw_rounded_card(hdc, &cr, bg, border, 6);
+
+                let _ = SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, state.theme.text_title);
+                let old_font = SelectObject(hdc, HGDIOBJ(state.font.0));
+                let mut text_w: Vec<u16> = state.text.encode_utf16().chain(std::iter::once(0)).collect();
+                let mut r = RECT { left: 8, top: 0, right: cr.right - 8, bottom: cr.bottom };
+                DrawTextW(hdc, &mut text_w, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                SelectObject(hdc, old_font);
+            }
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_NCDESTROY => {
+            let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut TooltipState;
+            if !state_ptr.is_null() {
+                let _ = Box::from_raw(state_ptr);
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+unsafe fn show_or_update_tooltip(
+    hwnd_dock: HWND,
+    state: &mut SidebarState,
+    hit: Option<SidebarHit>,
+) {
+    let text = match hit {
+        Some(SidebarHit::SelectAllBtn) => {
+            let history = &*state.history_ptr;
+            let all_sel = !history.entries.is_empty() && state.selected_ids.len() == history.entries.len();
+            if all_sel { "Deselect All" } else { "Select All" }
+        }
+        Some(SidebarHit::ClearBtn) => {
+            if !state.selected_ids.is_empty() { "Delete Selected" } else { "Clear All" }
+        }
+        Some(SidebarHit::CloseBtn) => "Close Dock",
+        Some(SidebarHit::CardOpen(_)) => "Open Image",
+        Some(SidebarHit::CardCopy(_)) => "Copy Image",
+        Some(SidebarHit::CardPath(_)) => "Copy Path",
+        Some(SidebarHit::CardDelete(_)) => "Delete",
+        _ => {
+            if let Some(tip_hwnd) = state.tooltip_hwnd {
+                let _ = ShowWindow(tip_hwnd, SW_HIDE);
+            }
+            return;
+        }
+    };
+
+    let instance = match GetModuleHandleW(None) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let tip_class = w!("SnapdockNativeTooltip");
+    let wc = WNDCLASSW {
+        lpfnWndProc: Some(tooltip_wndproc),
+        hInstance: instance.into(),
+        lpszClassName: tip_class,
+        ..Default::default()
+    };
+    let _ = RegisterClassW(&wc);
+
+    let tip_hwnd = if let Some(h) = state.tooltip_hwnd {
+        h
+    } else {
+        let h = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
+            tip_class,
+            w!("SnapdockTip"),
+            WS_POPUP,
+            0,
+            0,
+            100,
+            24,
+            Some(hwnd_dock),
+            None,
+            Some(instance.into()),
+            None,
+        );
+        let h = match h {
+            Ok(hwnd) => hwnd,
+            Err(_) => return,
+        };
+        let _ = SetLayeredWindowAttributes(h, COLORREF(0), 245, LWA_ALPHA);
+        state.tooltip_hwnd = Some(h);
+        h
+    };
+
+    // Calculate text width
+    let hdc = GetDC(Some(tip_hwnd));
+    let old_font = SelectObject(hdc, HGDIOBJ(state.font_small.0));
+    let text_w: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut sz = SIZE::default();
+    let _ = GetTextExtentPoint32W(hdc, &text_w[..text_w.len() - 1], &mut sz);
+    SelectObject(hdc, old_font);
+    ReleaseDC(Some(tip_hwnd), hdc);
+
+    let tip_w = (sz.cx + 20).max(40);
+    let tip_h = 24;
+
+    // Position tooltip to the left of the dock
+    let mut dock_rect = RECT::default();
+    let _ = GetWindowRect(hwnd_dock, &mut dock_rect);
+
+    let mut cursor_pt = POINT::default();
+    let _ = GetCursorPos(&mut cursor_pt);
+
+    let tip_x = dock_rect.left - tip_w - 8;
+    let tip_y = (cursor_pt.y - tip_h / 2).max(dock_rect.top).min(dock_rect.bottom - tip_h);
+
+    // Update state pointer
+    let old_state_raw = GetWindowLongPtrW(tip_hwnd, GWLP_USERDATA) as *mut TooltipState;
+    if !old_state_raw.is_null() {
+        let _ = Box::from_raw(old_state_raw);
+    }
+    let tip_state = Box::new(TooltipState {
+        text: text.to_string(),
+        theme: state.theme,
+        font: state.font_small,
+    });
+    SetWindowLongPtrW(tip_hwnd, GWLP_USERDATA, Box::into_raw(tip_state) as isize);
+
+    let _ = SetWindowPos(
+        tip_hwnd,
+        Some(HWND_TOPMOST),
+        tip_x,
+        tip_y,
+        tip_w,
+        tip_h,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
+    let _ = InvalidateRect(Some(tip_hwnd), None, true);
+}
+
 unsafe fn paint_sidebar(hwnd: HWND, state: &SidebarState) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
@@ -570,25 +749,32 @@ unsafe fn paint_sidebar(hwnd: HWND, state: &SidebarState) {
     let mem_bmp = CreateCompatibleBitmap(hdc, cr.right, cr.bottom);
     let old_bmp = SelectObject(mem_dc, HGDIOBJ(mem_bmp.0));
 
-    // Fill background
-    let bg_brush = CreateSolidBrush(state.theme.window_bg);
+    // Refined dock background: slightly darker on light mode, elevated on dark mode
+    let dock_bg = if state.theme.is_dark {
+        theme::rgb(34, 34, 38)
+    } else {
+        theme::rgb(228, 230, 235)
+    };
+
+    let bg_brush = CreateSolidBrush(dock_bg);
     FillRect(mem_dc, &cr, bg_brush);
     let _ = DeleteObject(HGDIOBJ(bg_brush.0));
 
     let history = &*state.history_ptr;
     let count = history.entries.len();
+    let bar_top = state.cur_dock_h - TOOLBAR_HEIGHT;
 
-    // --- CARDS LIST (Clipped to below header) ---
-    let card_area = RECT { left: 0, top: HEADER_HEIGHT, right: cr.right, bottom: cr.bottom };
+    // --- CARDS LIST (Clipped above bottom toolbar) ---
+    let card_area = RECT { left: 0, top: 0, right: cr.right, bottom: bar_top };
     let card_rgn = CreateRectRgn(card_area.left, card_area.top, card_area.right, card_area.bottom);
     SelectClipRgn(mem_dc, Some(card_rgn));
 
     let card_step = CARD_HEIGHT + CARD_GAP;
     for (idx, entry) in history.entries.iter().enumerate() {
-        let card_top = HEADER_HEIGHT + (idx as i32 * card_step) - state.scroll_y;
+        let card_top = 8 + (idx as i32 * card_step) - state.scroll_y;
         let card_bottom = card_top + CARD_HEIGHT;
 
-        if card_bottom < HEADER_HEIGHT || card_top > cr.bottom {
+        if card_bottom < 0 || card_top > bar_top {
             continue; // off-screen
         }
 
@@ -611,13 +797,19 @@ unsafe fn paint_sidebar(hwnd: HWND, state: &SidebarState) {
             state.theme.card_border
         };
 
+        let card_bg = if state.theme.is_dark {
+            theme::rgb(44, 44, 50)
+        } else {
+            theme::rgb(246, 247, 250)
+        };
+
         let card_rect = RECT {
             left: 8,
             top: card_top,
             right: cr.right - 8,
             bottom: card_bottom,
         };
-        draw_rounded_card(mem_dc, &card_rect, state.theme.card_bg, border_color, 8);
+        draw_rounded_card(mem_dc, &card_rect, card_bg, border_color, 8);
 
         // Selection badge in top-left corner
         if is_selected {
@@ -638,9 +830,9 @@ unsafe fn paint_sidebar(hwnd: HWND, state: &SidebarState) {
             SelectObject(mem_dc, old_font);
         }
 
-        // Center thumbnail in upper card region
+        // Center thumbnail in upper card region with generous spacing
         let thumb_x = 8 + (140 - entry.thumb_w) / 2;
-        let thumb_y = card_top + 6 + (72 - entry.thumb_h).max(0) / 2;
+        let thumb_y = card_top + 8 + (66 - entry.thumb_h).max(0) / 2;
 
         let thumb_rgn = CreateRoundRectRgn(
             thumb_x,
@@ -661,18 +853,9 @@ unsafe fn paint_sidebar(hwnd: HWND, state: &SidebarState) {
         SelectClipRgn(mem_dc, Some(card_rgn));
         let _ = DeleteObject(HGDIOBJ(thumb_rgn.0));
 
-        // Thumbnail subtle border
-        let t_pen = CreatePen(PS_SOLID, 1, state.theme.card_border);
-        let old_pen = SelectObject(mem_dc, HGDIOBJ(t_pen.0));
-        let old_brush = SelectObject(mem_dc, GetStockObject(HOLLOW_BRUSH));
-        let _ = RoundRect(mem_dc, thumb_x, thumb_y, thumb_x + entry.thumb_w, thumb_y + entry.thumb_h, 6, 6);
-        SelectObject(mem_dc, old_pen);
-        SelectObject(mem_dc, old_brush);
-        let _ = DeleteObject(HGDIOBJ(t_pen.0));
-
-        // Action buttons row (Open, Copy, Path, Delete)
-        let btn_top = card_top + 82;
-        let btn_bottom = card_top + 106;
+        // Action buttons row with clean vertical spacing (NO dividing line)
+        let btn_top = card_top + 86;
+        let btn_bottom = card_top + 110;
 
         let open_hover = state.hovered == Some(SidebarHit::CardOpen(idx));
         let copy_hover = state.hovered == Some(SidebarHit::CardCopy(idx));
@@ -708,22 +891,27 @@ unsafe fn paint_sidebar(hwnd: HWND, state: &SidebarState) {
         let _ = SetBkMode(mem_dc, TRANSPARENT);
         SetTextColor(mem_dc, state.theme.text_muted);
         let mut empty_msg: Vec<u16> = "No captures\nTake screenshot\0".encode_utf16().collect();
-        let mut r_empty = RECT { left: 8, top: HEADER_HEIGHT + 14, right: cr.right - 8, bottom: cr.bottom - 8 };
+        let mut r_empty = RECT { left: 8, top: 22, right: cr.right - 8, bottom: bar_top - 8 };
         DrawTextW(mem_dc, &mut empty_msg, &mut r_empty, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
         SelectObject(mem_dc, old_font);
     }
 
-    // --- HEADER (Fixed at top) ---
-    let header_rect = RECT { left: 0, top: 0, right: cr.right, bottom: HEADER_HEIGHT };
-    let h_brush = CreateSolidBrush(state.theme.window_bg);
-    FillRect(mem_dc, &header_rect, h_brush);
-    let _ = DeleteObject(HGDIOBJ(h_brush.0));
+    // --- BOTTOM TOOLBAR (Fixed at bottom of dock) ---
+    let bar_rect = RECT { left: 0, top: bar_top, right: cr.right, bottom: cr.bottom };
+    let bar_bg_color = if state.theme.is_dark {
+        theme::rgb(26, 26, 30)
+    } else {
+        theme::rgb(216, 218, 224)
+    };
+    let bar_brush = CreateSolidBrush(bar_bg_color);
+    FillRect(mem_dc, &bar_rect, bar_brush);
+    let _ = DeleteObject(HGDIOBJ(bar_brush.0));
 
-    // Bottom border of header
+    // Top border of bottom toolbar
     let line_pen = CreatePen(PS_SOLID, 1, state.theme.card_border);
     let old_pen = SelectObject(mem_dc, HGDIOBJ(line_pen.0));
-    let _ = MoveToEx(mem_dc, 8, HEADER_HEIGHT - 1, None);
-    let _ = LineTo(mem_dc, cr.right - 8, HEADER_HEIGHT - 1);
+    let _ = MoveToEx(mem_dc, 8, bar_top, None);
+    let _ = LineTo(mem_dc, cr.right - 8, bar_top);
     SelectObject(mem_dc, old_pen);
     let _ = DeleteObject(HGDIOBJ(line_pen.0));
 
@@ -750,7 +938,7 @@ unsafe fn paint_sidebar(hwnd: HWND, state: &SidebarState) {
         )
     };
 
-    let select_all_rect = RECT { left: 8, top: 9, right: 86, bottom: 35 };
+    let select_all_rect = RECT { left: 8, top: bar_top + 9, right: 86, bottom: bar_top + 35 };
     draw_icon_and_text_btn(
         mem_dc,
         &select_all_rect,
@@ -765,7 +953,7 @@ unsafe fn paint_sidebar(hwnd: HWND, state: &SidebarState) {
 
     // 2. Clear Button (Trash)
     let clear_hover = state.hovered == Some(SidebarHit::ClearBtn);
-    let clear_rect = RECT { left: 92, top: 9, right: 118, bottom: 35 };
+    let clear_rect = RECT { left: 92, top: bar_top + 9, right: 118, bottom: bar_top + 35 };
     let clear_bg = if clear_hover { state.theme.btn_hover } else { state.theme.btn_bg };
     let clear_fg = if clear_hover {
         if some_selected { state.theme.close_red } else { state.theme.accent }
@@ -776,7 +964,7 @@ unsafe fn paint_sidebar(hwnd: HWND, state: &SidebarState) {
 
     // 3. Close Button (✕)
     let close_hover = state.hovered == Some(SidebarHit::CloseBtn);
-    let close_rect = RECT { left: 122, top: 9, right: 148, bottom: 35 };
+    let close_rect = RECT { left: 122, top: bar_top + 9, right: 148, bottom: bar_top + 35 };
     let close_bg = if close_hover { state.theme.close_red } else { state.theme.btn_bg };
     let close_fg = if close_hover { theme::rgb(255, 255, 255) } else { state.theme.text_title };
     draw_icon_btn(mem_dc, &close_rect, icons::CLOSE, state.font_icon_btn, close_bg, close_fg, state.theme.card_border);
@@ -890,6 +1078,7 @@ unsafe extern "system" fn sidebar_wndproc(
 
             if hit != state.hovered {
                 state.hovered = hit;
+                show_or_update_tooltip(hwnd, state, hit);
                 let _ = InvalidateRect(Some(hwnd), None, false);
 
                 let mut tme = TRACKMOUSEEVENT {
@@ -921,6 +1110,7 @@ unsafe extern "system" fn sidebar_wndproc(
         WM_MOUSELEAVE => {
             if state.hovered.is_some() {
                 state.hovered = None;
+                show_or_update_tooltip(hwnd, state, None);
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(0)
@@ -930,9 +1120,7 @@ unsafe extern "system" fn sidebar_wndproc(
             let count = history.entries.len();
             let total_content_h = count as i32 * (CARD_HEIGHT + CARD_GAP);
 
-            let mut cr = RECT::default();
-            let _ = GetClientRect(hwnd, &mut cr);
-            let visible_h = cr.bottom - HEADER_HEIGHT;
+            let visible_h = state.cur_dock_h - TOOLBAR_HEIGHT - 8;
             let max_scroll = (total_content_h - visible_h).max(0);
 
             // Negative delta = scroll down
@@ -948,6 +1136,7 @@ unsafe extern "system" fn sidebar_wndproc(
                     let work = get_monitor_work_rect(hwnd);
                     let work_h = work.bottom - work.top;
                     let (dock_w, dock_h) = calculate_dock_dimensions(history.entries.len(), work_h);
+                    state.cur_dock_h = dock_h;
                     let target_x = work.right - DOCK_RIGHT_MARGIN - dock_w;
                     let y = work.top + (work_h - dock_h) / 2;
                     state.anim = Some(SidebarAnim {
@@ -984,6 +1173,7 @@ unsafe extern "system" fn sidebar_wndproc(
                     } else {
                         state.selected_ids = history.entries.iter().map(|e| e.id).collect();
                     }
+                    show_or_update_tooltip(hwnd, state, Some(SidebarHit::SelectAllBtn));
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 Some(SidebarHit::ClearBtn) => {
@@ -1003,8 +1193,7 @@ unsafe extern "system" fn sidebar_wndproc(
                 }
                 Some(SidebarHit::CardOpen(idx)) => {
                     if let Some(entry) = history.entries.get(idx) {
-                        let path_w: Vec<u16> = entry.file_path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
-                        let _ = ShellExecuteW(Some(hwnd), w!("open"), PCWSTR(path_w.as_ptr()), None, None, SW_SHOWNORMAL);
+                        open_image_file(hwnd, &entry.file_path);
                     }
                 }
                 Some(SidebarHit::CardCopy(idx)) => {
@@ -1061,12 +1250,22 @@ unsafe extern "system" fn sidebar_wndproc(
         }
         WM_DESTROY => {
             let _ = KillTimer(Some(hwnd), TIMER_ANIM_ID);
+            if let Some(tip) = state.tooltip_hwnd.take() {
+                let _ = DestroyWindow(tip);
+            }
             history.sidebar_hwnd = None;
             let _ = Box::from_raw(state_ptr);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn open_image_file(hwnd: HWND, path: &Path) {
+    let path_w: Vec<u16> = path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let _ = ShellExecuteW(Some(hwnd), w!("open"), PCWSTR(path_w.as_ptr()), None, None, SW_SHOWNORMAL);
     }
 }
 
@@ -1174,7 +1373,7 @@ pub fn open_sidebar_window(main_hwnd: HWND, history_ptr: *mut HistoryManager) ->
         let theme = theme::ThemeColors::current();
         theme::apply_window_theme(hwnd, theme.is_dark);
 
-        let mut state = Box::new(SidebarState::new(main_hwnd, history_ptr));
+        let mut state = Box::new(SidebarState::new(main_hwnd, history_ptr, dock_h));
         state.anim = Some(SidebarAnim {
             is_closing: false,
             start_time: std::time::Instant::now(),
@@ -1208,17 +1407,17 @@ mod tests {
         // Empty state
         let (w0, h0) = calculate_dock_dimensions(0, work_h);
         assert_eq!(w0, DOCK_WIDTH);
-        assert_eq!(h0, HEADER_HEIGHT + 70 + 8);
+        assert_eq!(h0, TOOLBAR_HEIGHT + 74 + 16);
 
         // 1 item
         let (w1, h1) = calculate_dock_dimensions(1, work_h);
         assert_eq!(w1, DOCK_WIDTH);
-        assert_eq!(h1, HEADER_HEIGHT + CARD_HEIGHT + 10);
+        assert_eq!(h1, TOOLBAR_HEIGHT + 8 + CARD_HEIGHT + 12);
 
         // 2 items
         let (w2, h2) = calculate_dock_dimensions(2, work_h);
         assert_eq!(w2, DOCK_WIDTH);
-        assert_eq!(h2, HEADER_HEIGHT + 2 * CARD_HEIGHT + CARD_GAP + 10);
+        assert_eq!(h2, TOOLBAR_HEIGHT + 8 + 2 * CARD_HEIGHT + CARD_GAP + 12);
         assert!(h2 > h1);
 
         // Max height clamping on small screen
@@ -1227,26 +1426,28 @@ mod tests {
     }
 
     #[test]
-    fn test_header_hit_test() {
+    fn test_bottom_toolbar_hit_test() {
         let dummy_hwnd = HWND(std::ptr::null_mut());
         let mut manager = HistoryManager::new();
-        let state = SidebarState::new(dummy_hwnd, &mut manager as *mut HistoryManager);
+        let dock_h = 200;
+        let state = SidebarState::new(dummy_hwnd, &mut manager as *mut HistoryManager, dock_h);
+        let bar_top = dock_h - TOOLBAR_HEIGHT;
 
-        // Select All button
+        // Select All button at bottom
         assert_eq!(
-            hit_test(POINT { x: 20, y: 20 }, &state, 0),
+            hit_test(POINT { x: 20, y: bar_top + 20 }, &state, 0),
             Some(SidebarHit::SelectAllBtn)
         );
 
-        // Clear button
+        // Clear button at bottom
         assert_eq!(
-            hit_test(POINT { x: 105, y: 20 }, &state, 0),
+            hit_test(POINT { x: 105, y: bar_top + 20 }, &state, 0),
             Some(SidebarHit::ClearBtn)
         );
 
-        // Close button
+        // Close button at bottom
         assert_eq!(
-            hit_test(POINT { x: 135, y: 20 }, &state, 0),
+            hit_test(POINT { x: 135, y: bar_top + 20 }, &state, 0),
             Some(SidebarHit::CloseBtn)
         );
     }

@@ -84,40 +84,35 @@ float snoise(vec2 v) {
     return 130.0 * dot(m, g);
 }
 
-// Multi-octave Fractal Brownian Motion (FBM) with rotation
+// Multi-octave Fractal Brownian Motion (FBM) with gentle rotation
 float fbm(vec2 p) {
     float f = 0.0;
     float amp = 0.5;
     mat2 rot = mat2(0.80, 0.60, -0.60, 0.80);
     for (int i = 0; i < 4; i++) {
         f += amp * snoise(p);
-        p = rot * p * 2.05 + vec2(1.7, 3.2);
+        p = rot * p * 2.02 + vec2(1.6, 2.7);
         amp *= 0.5;
     }
     return f;
 }
 
-// Multi-stage Domain Warping: p' = p + fbm(p + fbm(p))
+// Low-frequency multi-stage Domain Warping for smooth, liquid wave ribbons
 vec2 domainWarp(vec2 p, float t, float strength) {
-    // Stage 1: Broad sweeping fluid currents
+    // Stage 1: Broad sweeping fluid currents (low frequency)
     vec2 q = vec2(
-        fbm(p + vec2(0.0, 0.0) + vec2(t * 0.035, t * 0.02)),
-        fbm(p + vec2(5.2, 1.3) + vec2(-t * 0.025, t * 0.03))
+        fbm(p * 0.75 + vec2(0.0, 0.0) + vec2(t * 0.025, t * 0.015)),
+        fbm(p * 0.75 + vec2(4.3, 1.7) + vec2(-t * 0.020, t * 0.022))
     );
 
-    // Stage 2: Second-order warping (produces asymmetrical, curling wave ribbons)
+    // Stage 2: Second-order warping (produces broad curved wave fronts)
     vec2 r = vec2(
-        fbm(p + 3.0 * q + vec2(1.7, 9.2) + vec2(t * 0.015, -t * 0.02)),
-        fbm(p + 3.0 * q + vec2(8.3, 2.8) + vec2(-t * 0.012, t * 0.018))
+        fbm(p * 0.85 + 2.4 * q + vec2(1.7, 8.4) + vec2(t * 0.012, -t * 0.016)),
+        fbm(p * 0.85 + 2.4 * q + vec2(7.8, 2.3) + vec2(-t * 0.014, t * 0.012))
     );
 
-    // Stage 3: Fine wave undulation
-    vec2 s = vec2(
-        snoise(p * 2.0 + r * 1.6 + vec2(t * 0.035, -t * 0.025)),
-        snoise(p * 2.0 + r * 1.6 + vec2(-t * 0.025, t * 0.035))
-    );
-
-    return p + (q * 0.55 + r * 0.35 + s * 0.12) * strength;
+    // Smooth, atmospheric wave deformation without marble crinkling
+    return p + (q * 0.65 + r * 0.35) * strength;
 }
 
 // Procedural analog film grain with triangular distribution
@@ -154,49 +149,49 @@ void main() {
     float t = u_time;
 
     // Subtle interactive mouse influence if active
-    vec2 mouseOffset = (u_mouse - 0.5) * 0.08;
+    vec2 mouseOffset = (u_mouse - 0.5) * 0.06;
 
     // Aspect-normalized coordinates for wave calculations to avoid stretching
     vec2 normCoord = vec2((st.x - 0.5) * aspect + 0.5, st.y);
-    vec2 warpDomain = normCoord * 1.6 + mouseOffset;
+    vec2 warpDomain = normCoord * 1.15 + mouseOffset;
 
-    // Perform multi-layer domain warping
+    // Perform low-frequency domain warping
     vec2 warped = domainWarp(warpDomain, t, u_wave_intensity);
 
     // Compute spatial coordinates deformed by the warped domain
-    vec2 wUv = st + (warped - warpDomain) * 0.38;
+    vec2 wUv = st + (warped - warpDomain) * 0.42;
 
     // -------------------------------------------------------------
-    // COLOR FIELD SYNTHESIS
+    // COLOR FIELD SYNTHESIS (Smooth, flowing wave bands)
     // -------------------------------------------------------------
 
     // 1. Upper-Left Field: Warm Butter Yellow & Cream
-    float distUL = length(vec2(wUv.x - 0.12, wUv.y - 0.98));
-    float waveUL = sin(wUv.x * 3.2 - wUv.y * 2.8 + fbm(wUv * 2.5 + vec2(t * 0.02, 0.0)) * 2.2);
-    float wYellow = smoothstep(0.85, 0.18, distUL + waveUL * 0.15);
-    vec3 yellowCol = mix(C_WARM_CREAM, C_BUTTER_YELLOW, smoothstep(0.12, 0.55, distUL));
+    float distUL = length(vec2(wUv.x - 0.10, wUv.y - 0.98));
+    float waveUL = sin(wUv.x * 2.4 - wUv.y * 2.0 + fbm(wUv * 1.6 + vec2(t * 0.02, 0.0)) * 2.0);
+    float wYellow = smoothstep(0.92, 0.22, distUL + waveUL * 0.14);
+    vec3 yellowCol = mix(C_WARM_CREAM, C_BUTTER_YELLOW, smoothstep(0.12, 0.60, distUL));
 
-    // 2. Upper-Center & Upper-Right: Pale Cyan & Powder Blue
-    float cyanBand = (wUv.x * 0.82 + wUv.y * 0.72) - 0.65;
-    float waveCyan = cos(wUv.x * 3.8 + wUv.y * 2.6 + fbm(wUv * 2.6 + vec2(3.0, t * 0.025)) * 2.4);
-    float wCyan = smoothstep(-0.25, 0.38, cyanBand + waveCyan * 0.22) * smoothstep(0.28, 0.68, wUv.y);
-    vec3 blueCol = mix(C_PALE_CYAN, C_POWDER_BLUE, smoothstep(0.45, 0.85, wUv.x));
+    // 2. Upper-Center & Upper-Right: Pale Cyan & Powder Blue (sweeping cool wave)
+    float cyanBand = (wUv.x * 0.90 + wUv.y * 0.85) - 0.62;
+    float waveCyan = cos(wUv.x * 2.8 + wUv.y * 2.0 + fbm(wUv * 1.8 + vec2(2.5, t * 0.02)) * 2.2);
+    float wCyan = smoothstep(-0.28, 0.35, cyanBand + waveCyan * 0.22) * smoothstep(0.24, 0.62, wUv.y);
+    vec3 blueCol = mix(C_PALE_CYAN, C_POWDER_BLUE, smoothstep(0.35, 0.80, wUv.x));
 
     // 3. Right & Mid-Right Field: Lavender, Dusty Pink & Vibrant Coral
-    float distR = length(vec2(wUv.x - 0.98, wUv.y - 0.48));
-    float waveR = sin(wUv.y * 4.5 - wUv.x * 2.2 + fbm(wUv * 2.8 + vec2(5.0, -t * 0.02)) * 2.0);
-    float wRight = smoothstep(0.88, 0.22, distR + waveR * 0.18);
+    float distR = length(vec2(wUv.x - 0.98, wUv.y - 0.46));
+    float waveR = sin(wUv.y * 3.2 - wUv.x * 1.8 + fbm(wUv * 2.0 + vec2(4.5, -t * 0.018)) * 1.8);
+    float wRight = smoothstep(0.90, 0.25, distR + waveR * 0.16);
     vec3 rightCol = mix(C_LAVENDER, C_DUSTY_PINK, smoothstep(-0.35, 0.35, waveR));
-    rightCol = mix(rightCol, C_CORAL, smoothstep(0.68, 0.98, wUv.x));
+    rightCol = mix(rightCol, C_CORAL, smoothstep(0.65, 0.98, wUv.x));
 
     // 4. Bottom-Left Field: Raspberry & Hot Pink
-    float distBL = length(vec2(wUv.x - 0.15, wUv.y - 0.12));
-    float waveBL = sin(wUv.x * 3.6 + wUv.y * 3.2 + fbm(wUv * 2.4 + vec2(7.0, t * 0.018)) * 2.2);
-    float wRed = smoothstep(0.82, 0.18, distBL + waveBL * 0.18);
-    vec3 redCol = mix(C_HOT_PINK, C_RASPBERRY, smoothstep(0.42, 0.15, wUv.y));
+    float distBL = length(vec2(wUv.x - 0.12, wUv.y - 0.10));
+    float waveBL = sin(wUv.x * 2.6 + wUv.y * 2.4 + fbm(wUv * 1.8 + vec2(6.5, t * 0.015)) * 1.8);
+    float wRed = smoothstep(0.88, 0.20, distBL + waveBL * 0.16);
+    vec3 redCol = mix(C_HOT_PINK, C_RASPBERRY, smoothstep(0.40, 0.12, wUv.y));
 
     // 5. Center-Left & Lower-Middle Base: Warm Peach & Coral
-    vec3 basePeach = mix(C_PEACH, C_CORAL, smoothstep(0.25, 0.78, wUv.x));
+    vec3 basePeach = mix(C_PEACH, C_CORAL, smoothstep(0.22, 0.75, wUv.x));
 
     // -------------------------------------------------------------
     // ORGANIC WAVE COMPOSITION & BLENDING
@@ -206,25 +201,21 @@ void main() {
     // Raspberry & Hot Pink flowing from bottom-left
     col = mix(col, redCol, clamp(wRed, 0.0, 1.0));
 
-    // Pale Cyan & Powder Blue flowing across top-center & top-right
-    col = mix(col, blueCol, clamp(wCyan * (1.0 - wRed * 0.7), 0.0, 1.0));
+    // Lavender, Dusty Pink & Coral streaming along the right
+    col = mix(col, rightCol, clamp(wRight * (1.0 - wRed * 0.45), 0.0, 1.0));
+
+    // Pale Cyan & Powder Blue sweeping across upper-center & upper-right
+    col = mix(col, blueCol, clamp(wCyan * 1.25 * (1.0 - wRed * 0.65), 0.0, 1.0));
 
     // Butter Yellow & Warm Cream pouring into top-left
-    col = mix(col, yellowCol, clamp(wYellow * (1.0 - wRed * 0.5), 0.0, 1.0));
-
-    // Lavender, Dusty Pink & Coral streaming along the right
-    col = mix(col, rightCol, clamp(wRight * (1.0 - wYellow * 0.55), 0.0, 1.0));
+    col = mix(col, yellowCol, clamp(wYellow * (1.0 - wCyan * 0.55), 0.0, 1.0));
 
     // Secondary flowing wave ribbons weaving between the boundaries
-    float ribbonCoral = smoothstep(0.18, 0.0, abs(sin(wUv.x * 3.4 - wUv.y * 2.8 + fbm(wUv * 3.0) * 2.8) - 0.15));
+    float ribbonCoral = smoothstep(0.22, 0.0, abs(sin(wUv.x * 2.4 - wUv.y * 2.0 + fbm(wUv * 2.0) * 2.2) - 0.12));
     col = mix(col, C_CORAL, ribbonCoral * 0.32 * smoothstep(0.18, 0.75, wUv.y));
 
-    float ribbonLavender = smoothstep(0.20, 0.0, abs(cos(wUv.x * 2.8 + wUv.y * 3.2 + fbm(wUv * 3.2 + 2.0) * 2.6) - 0.10));
-    col = mix(col, C_LAVENDER, ribbonLavender * 0.28 * smoothstep(0.35, 0.85, wUv.x));
-
-    // Subtle micro-luminance variation for painterly analog depth
-    float microVariation = snoise(wUv * 8.0 + t * 0.02) * 0.022;
-    col += microVariation;
+    float ribbonLavender = smoothstep(0.24, 0.0, abs(cos(wUv.x * 2.0 + wUv.y * 2.4 + fbm(wUv * 2.2 + 2.0) * 2.0) - 0.08));
+    col = mix(col, C_LAVENDER, ribbonLavender * 0.30 * smoothstep(0.35, 0.85, wUv.x));
 
     // Fine analog film grain overlay with 35mm photographic response
     col = applyFilmGrain(col, gl_FragCoord.xy, u_time, u_grain_intensity);
@@ -461,7 +452,7 @@ export function OrganicGrainyBackground({
   return (
     <div
       ref={containerRef}
-      className={`relative w-full h-full overflow-hidden ${className}`}
+      className={`relative w-full flex-1 min-h-full overflow-hidden ${className}`}
     >
       {webGlSupported ? (
         <canvas

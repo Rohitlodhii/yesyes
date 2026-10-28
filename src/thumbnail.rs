@@ -9,12 +9,15 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 pub const WM_SNAPDOCK_THUMB_DISMISSED: u32 = WM_APP + 2;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_DISMISS_ID: usize = 1;
+const TIMER_ANIM_ID: usize = 2;
 
 pub struct ThumbnailWindow {
     pub id: usize,
     pub hwnd: HWND,
     pub width: i32,
     pub height: i32,
+    pub cur_y: i32,
+    pub is_new: bool,
 }
 
 pub struct ThumbnailStack {
@@ -88,23 +91,33 @@ impl ThumbnailStack {
             let gap = 10;
             let mut cur_bottom = mi.rcWork.bottom - margin;
 
-            for thumb in self.thumbnails.iter() {
+            for thumb in self.thumbnails.iter_mut() {
                 let x = mi.rcWork.right - margin - thumb.width;
                 let y = cur_bottom - thumb.height;
                 cur_bottom = y - gap;
 
-                let _ = SetWindowPos(
-                    thumb.hwnd,
-                    Some(HWND_TOPMOST),
-                    x,
-                    y,
-                    thumb.width,
-                    thumb.height,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                );
+                if thumb.is_new {
+                    thumb.is_new = false;
+                    thumb.cur_y = y;
+                    start_thumb_entry_anim(thumb.hwnd, x, y, thumb.width, thumb.height);
+                } else if thumb.cur_y != y {
+                    start_thumb_move_anim(thumb.hwnd, x, y, thumb.width, thumb.height);
+                    thumb.cur_y = y;
+                }
             }
         }
     }
+}
+
+struct ThumbAnim {
+    is_exiting: bool,
+    start_time: std::time::Instant,
+    duration: std::time::Duration,
+    target_x: i32,
+    start_y: i32,
+    target_y: i32,
+    start_alpha: u8,
+    target_alpha: u8,
 }
 
 struct ThumbnailState {
@@ -122,6 +135,106 @@ struct ThumbnailState {
     copied_indicator: bool,
 
     drag_start: Option<(i32, i32)>,
+    anim: Option<ThumbAnim>,
+}
+
+unsafe fn start_thumb_entry_anim(hwnd: HWND, target_x: i32, target_y: i32, w: i32, h: i32) {
+    let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ThumbnailState;
+    if state_ptr.is_null() {
+        return;
+    }
+    let state = &mut *state_ptr;
+
+    let start_y = target_y + 16;
+    let _ = SetWindowPos(
+        hwnd,
+        Some(HWND_TOPMOST),
+        target_x,
+        start_y,
+        w,
+        h,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
+    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA);
+
+    state.anim = Some(ThumbAnim {
+        is_exiting: false,
+        start_time: std::time::Instant::now(),
+        duration: std::time::Duration::from_millis(160),
+        target_x,
+        start_y,
+        target_y,
+        start_alpha: 0,
+        target_alpha: 255,
+    });
+    let _ = SetTimer(Some(hwnd), TIMER_ANIM_ID, 16, None);
+}
+
+unsafe fn start_thumb_move_anim(hwnd: HWND, target_x: i32, target_y: i32, _w: i32, _h: i32) {
+    let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ThumbnailState;
+    if state_ptr.is_null() {
+        return;
+    }
+    let state = &mut *state_ptr;
+
+    let mut rect = RECT::default();
+    let _ = GetWindowRect(hwnd, &mut rect);
+    let cur_y = rect.top;
+    if cur_y == target_y {
+        return;
+    }
+
+    state.anim = Some(ThumbAnim {
+        is_exiting: false,
+        start_time: std::time::Instant::now(),
+        duration: std::time::Duration::from_millis(140),
+        target_x,
+        start_y: cur_y,
+        target_y,
+        start_alpha: 255,
+        target_alpha: 255,
+    });
+    let _ = SetTimer(Some(hwnd), TIMER_ANIM_ID, 16, None);
+}
+
+unsafe fn start_thumb_exit_anim(hwnd: HWND, state: &mut ThumbnailState) {
+    if state.anim.as_ref().map_or(false, |a| a.is_exiting) {
+        return;
+    }
+    let _ = KillTimer(Some(hwnd), TIMER_DISMISS_ID);
+
+    // Notify main window to remove from stack tracking immediately so layout adjusts
+    let _ = PostMessageW(
+        Some(state.main_hwnd),
+        WM_SNAPDOCK_THUMB_DISMISSED,
+        WPARAM(state.id),
+        LPARAM(0),
+    );
+
+    let mut rect = RECT::default();
+    let _ = GetWindowRect(hwnd, &mut rect);
+
+    let cur_alpha = if let Some(anim) = &state.anim {
+        let elapsed = anim.start_time.elapsed().as_secs_f32() * 1000.0;
+        let total = anim.duration.as_secs_f32() * 1000.0;
+        let t = (elapsed / total).clamp(0.0, 1.0);
+        let ease = 1.0 - (1.0 - t).powi(3);
+        (anim.start_alpha as f32 + ((anim.target_alpha as f32 - anim.start_alpha as f32) * ease)).round() as u8
+    } else {
+        255
+    };
+
+    state.anim = Some(ThumbAnim {
+        is_exiting: true,
+        start_time: std::time::Instant::now(),
+        duration: std::time::Duration::from_millis(120),
+        target_x: rect.left,
+        start_y: rect.top,
+        target_y: rect.top + 6,
+        start_alpha: cur_alpha,
+        target_alpha: 0,
+    });
+    let _ = SetTimer(Some(hwnd), TIMER_ANIM_ID, 16, None);
 }
 
 unsafe extern "system" fn thumb_wndproc(
@@ -147,13 +260,41 @@ unsafe extern "system" fn thumb_wndproc(
                             *ticks -= 1;
                         }
                         if *ticks == 0 {
-                            let _ = KillTimer(Some(hwnd), TIMER_DISMISS_ID);
-                            let _ = PostMessageW(
-                                Some(state.main_hwnd),
-                                WM_SNAPDOCK_THUMB_DISMISSED,
-                                WPARAM(state.id),
-                                LPARAM(0),
-                            );
+                            start_thumb_exit_anim(hwnd, state);
+                        }
+                    }
+                }
+            } else if wparam.0 == TIMER_ANIM_ID {
+                if let Some(anim) = &mut state.anim {
+                    let elapsed = anim.start_time.elapsed().as_secs_f32() * 1000.0;
+                    let total = anim.duration.as_secs_f32() * 1000.0;
+                    let t = (elapsed / total).clamp(0.0, 1.0);
+
+                    let ease = if anim.is_exiting {
+                        t * t
+                    } else {
+                        1.0 - (1.0 - t).powi(3)
+                    };
+
+                    let cur_y = anim.start_y + ((anim.target_y - anim.start_y) as f32 * ease).round() as i32;
+                    let cur_alpha = (anim.start_alpha as f32 + ((anim.target_alpha as f32 - anim.start_alpha as f32) * ease)).round() as u8;
+
+                    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), cur_alpha, LWA_ALPHA);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOPMOST),
+                        anim.target_x,
+                        cur_y,
+                        state.width,
+                        state.height,
+                        SWP_NOACTIVATE,
+                    );
+
+                    if t >= 1.0 {
+                        let is_exiting = anim.is_exiting;
+                        state.anim = None;
+                        let _ = KillTimer(Some(hwnd), TIMER_ANIM_ID);
+                        if is_exiting {
                             let _ = DestroyWindow(hwnd);
                         }
                     }
@@ -162,6 +303,10 @@ unsafe extern "system" fn thumb_wndproc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            if state.anim.as_ref().map_or(false, |a| a.is_exiting) {
+                return LRESULT(0);
+            }
+
             let x = (lparam.0 & 0xffff) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
 
@@ -197,12 +342,18 @@ unsafe extern "system" fn thumb_wndproc(
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
+            if state.anim.as_ref().map_or(false, |a| a.is_exiting) {
+                return LRESULT(0);
+            }
             let x = (lparam.0 & 0xffff) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
             state.drag_start = Some((x, y));
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            if state.anim.as_ref().map_or(false, |a| a.is_exiting) {
+                return LRESULT(0);
+            }
             let x = (lparam.0 & 0xffff) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
 
@@ -212,14 +363,7 @@ unsafe extern "system" fn thumb_wndproc(
                 if dx <= 4 && dy <= 4 {
                     // Plain click without dragging
                     if state.is_hovering && is_close_button(x, y, state.width) {
-                        // Clicked close button
-                        let _ = PostMessageW(
-                            Some(state.main_hwnd),
-                            WM_SNAPDOCK_THUMB_DISMISSED,
-                            WPARAM(state.id),
-                            LPARAM(0),
-                        );
-                        let _ = DestroyWindow(hwnd);
+                        start_thumb_exit_anim(hwnd, state);
                     } else if state.is_hovering && is_copy_button(x, y) {
                         // Clicked copy-path button
                         if let Some(path_str) = state.saved_path.to_str() {
@@ -249,14 +393,10 @@ unsafe extern "system" fn thumb_wndproc(
             LRESULT(0)
         }
         WM_RBUTTONUP => {
-            // Right-click dismisses
-            let _ = PostMessageW(
-                Some(state.main_hwnd),
-                WM_SNAPDOCK_THUMB_DISMISSED,
-                WPARAM(state.id),
-                LPARAM(0),
-            );
-            let _ = DestroyWindow(hwnd);
+            if state.anim.as_ref().map_or(false, |a| a.is_exiting) {
+                return LRESULT(0);
+            }
+            start_thumb_exit_anim(hwnd, state);
             LRESULT(0)
         }
         WM_PAINT => {
@@ -287,6 +427,7 @@ unsafe extern "system" fn thumb_wndproc(
         }
         WM_NCDESTROY => {
             let _ = KillTimer(Some(hwnd), TIMER_DISMISS_ID);
+            let _ = KillTimer(Some(hwnd), TIMER_ANIM_ID);
             SelectObject(state.mem_hdc, state.old_bitmap);
             let _ = DeleteObject(HGDIOBJ(state.hbitmap.0));
             let _ = DeleteDC(state.mem_hdc);
@@ -435,6 +576,7 @@ fn create_thumbnail_window(
             remaining_ticks: lifespan,
             copied_indicator: false,
             drag_start: None,
+            anim: None,
         });
 
         // Styles: WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED
@@ -466,8 +608,8 @@ fn create_thumbnail_window(
         // Exclude thumbnail from screen capture
         let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
 
-        // Make layered window opaque initially
-        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+        // Initially fully transparent until entry animation starts
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA);
 
         let state_raw = Box::into_raw(state);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_raw as isize);
@@ -484,6 +626,8 @@ fn create_thumbnail_window(
             hwnd,
             width: thumb_w as i32,
             height: thumb_h as i32,
+            cur_y: 0,
+            is_new: true,
         })
     }
 }

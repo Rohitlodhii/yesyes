@@ -10,6 +10,8 @@ use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const TIMER_ANIM_ID: usize = 99;
+const WM_REQUEST_TOGGLE: u32 = WM_USER + 102;
 
 #[derive(Clone)]
 pub struct HistoryEntry {
@@ -133,8 +135,7 @@ impl HistoryManager {
         unsafe {
             if let Some(hwnd) = self.sidebar_hwnd {
                 if IsWindow(Some(hwnd)).as_bool() {
-                    let _ = DestroyWindow(hwnd);
-                    self.sidebar_hwnd = None;
+                    let _ = PostMessageW(Some(hwnd), WM_REQUEST_TOGGLE, WPARAM(0), LPARAM(0));
                     return;
                 }
             }
@@ -242,12 +243,24 @@ enum SidebarHit {
     CardDelete(usize),
 }
 
+struct SidebarAnim {
+    is_closing: bool,
+    start_time: std::time::Instant,
+    duration: std::time::Duration,
+    start_x: i32,
+    target_x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
 struct SidebarState {
     _main_hwnd: HWND,
     history_ptr: *mut HistoryManager,
     scroll_y: i32,
     hovered: Option<SidebarHit>,
     drag_start: Option<(i32, i32, usize)>, // x, y, card index
+    anim: Option<SidebarAnim>,
 
     font_title: HFONT,
     font_bold: HFONT,
@@ -264,6 +277,7 @@ impl SidebarState {
                 scroll_y: 0,
                 hovered: None,
                 drag_start: None,
+                anim: None,
                 font_title: create_font(17, 700),
                 font_bold: create_font(13, 600),
                 font_body: create_font(12, 400),
@@ -271,6 +285,40 @@ impl SidebarState {
             }
         }
     }
+}
+
+unsafe fn get_monitor_work_rect(hwnd: HWND) -> RECT {
+    let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let _ = GetMonitorInfoW(hmon, &mut mi);
+    mi.rcWork
+}
+
+unsafe fn start_close_animation(hwnd: HWND, state: &mut SidebarState) {
+    if state.anim.as_ref().map_or(false, |a| a.is_closing) {
+        return;
+    }
+    let mut rect = RECT::default();
+    let _ = GetWindowRect(hwnd, &mut rect);
+    let work = get_monitor_work_rect(hwnd);
+    let work_h = work.bottom - work.top;
+    let cur_x = rect.left;
+    let target_x = work.right;
+
+    state.anim = Some(SidebarAnim {
+        is_closing: true,
+        start_time: std::time::Instant::now(),
+        duration: std::time::Duration::from_millis(150),
+        start_x: cur_x,
+        target_x,
+        y: work.top,
+        w: SIDEBAR_WIDTH,
+        h: work_h,
+    });
+    let _ = SetTimer(Some(hwnd), TIMER_ANIM_ID, 16, None);
 }
 
 impl Drop for SidebarState {
@@ -566,6 +614,44 @@ unsafe extern "system" fn sidebar_wndproc(
 
     match msg {
         WM_ERASEBKGND => LRESULT(1),
+        WM_TIMER => {
+            if wparam.0 == TIMER_ANIM_ID {
+                if let Some(anim) = &mut state.anim {
+                    let elapsed = anim.start_time.elapsed().as_secs_f32() * 1000.0;
+                    let total = anim.duration.as_secs_f32() * 1000.0;
+                    let t = (elapsed / total).clamp(0.0, 1.0);
+
+                    let ease = if anim.is_closing {
+                        t * t * t
+                    } else {
+                        1.0 - (1.0 - t).powi(3)
+                    };
+
+                    let cur_x = anim.start_x + ((anim.target_x - anim.start_x) as f32 * ease).round() as i32;
+
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        cur_x,
+                        anim.y,
+                        anim.w,
+                        anim.h,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+
+                    if t >= 1.0 {
+                        let is_closing = anim.is_closing;
+                        state.anim = None;
+                        let _ = KillTimer(Some(hwnd), TIMER_ANIM_ID);
+                        if is_closing {
+                            let _ = ShowWindow(hwnd, SW_HIDE);
+                            let _ = DestroyWindow(hwnd);
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         WM_PAINT => {
             paint_sidebar(hwnd, state);
             LRESULT(0)
@@ -642,7 +728,35 @@ unsafe extern "system" fn sidebar_wndproc(
             let _ = InvalidateRect(Some(hwnd), None, false);
             LRESULT(0)
         }
+        WM_REQUEST_TOGGLE => {
+            if let Some(anim) = &state.anim {
+                if anim.is_closing {
+                    let mut rect = RECT::default();
+                    let _ = GetWindowRect(hwnd, &mut rect);
+                    let work = get_monitor_work_rect(hwnd);
+                    let target_x = work.right - SIDEBAR_WIDTH;
+                    state.anim = Some(SidebarAnim {
+                        is_closing: false,
+                        start_time: std::time::Instant::now(),
+                        duration: std::time::Duration::from_millis(160),
+                        start_x: rect.left,
+                        target_x,
+                        y: work.top,
+                        w: SIDEBAR_WIDTH,
+                        h: work.bottom - work.top,
+                    });
+                    let _ = SetTimer(Some(hwnd), TIMER_ANIM_ID, 16, None);
+                    return LRESULT(0);
+                }
+            }
+            start_close_animation(hwnd, state);
+            LRESULT(0)
+        }
         WM_LBUTTONDOWN => {
+            if state.anim.as_ref().map_or(false, |a| a.is_closing) {
+                return LRESULT(0);
+            }
+
             let x = (lparam.0 & 0xffff) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
             let pt = POINT { x, y };
@@ -650,7 +764,7 @@ unsafe extern "system" fn sidebar_wndproc(
             let count = history.entries.len();
             match hit_test(pt, state, count) {
                 Some(SidebarHit::CloseBtn) => {
-                    let _ = DestroyWindow(hwnd);
+                    start_close_animation(hwnd, state);
                 }
                 Some(SidebarHit::ClearBtn) => {
                     history.clear();
@@ -694,12 +808,13 @@ unsafe extern "system" fn sidebar_wndproc(
         WM_KEYDOWN => {
             let vk = wparam.0 as u32;
             if vk == 0x1B { // Esc closes sidebar
-                let _ = DestroyWindow(hwnd);
+                start_close_animation(hwnd, state);
                 return LRESULT(0);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_DESTROY => {
+            let _ = KillTimer(Some(hwnd), TIMER_ANIM_ID);
             history.sidebar_hwnd = None;
             let _ = Box::from_raw(state_ptr);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -764,7 +879,8 @@ pub fn open_sidebar_window(main_hwnd: HWND, history_ptr: *mut HistoryManager) ->
         let _ = GetMonitorInfoW(hmon, &mut mi);
 
         let work_h = mi.rcWork.bottom - mi.rcWork.top;
-        let x = mi.rcWork.right - SIDEBAR_WIDTH;
+        let target_x = mi.rcWork.right - SIDEBAR_WIDTH;
+        let start_x = mi.rcWork.right; // Start completely off-screen to the right
         let y = mi.rcWork.top;
 
         let hwnd = CreateWindowExW(
@@ -772,7 +888,7 @@ pub fn open_sidebar_window(main_hwnd: HWND, history_ptr: *mut HistoryManager) ->
             class_name,
             w!("Snapdock History"),
             WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-            x,
+            start_x,
             y,
             SIDEBAR_WIDTH,
             work_h,
@@ -792,10 +908,22 @@ pub fn open_sidebar_window(main_hwnd: HWND, history_ptr: *mut HistoryManager) ->
             std::mem::size_of::<i32>() as u32,
         );
 
-        let state = Box::new(SidebarState::new(main_hwnd, history_ptr));
+        let mut state = Box::new(SidebarState::new(main_hwnd, history_ptr));
+        state.anim = Some(SidebarAnim {
+            is_closing: false,
+            start_time: std::time::Instant::now(),
+            duration: std::time::Duration::from_millis(180),
+            start_x,
+            target_x,
+            y,
+            w: SIDEBAR_WIDTH,
+            h: work_h,
+        });
+
         let state_raw = Box::into_raw(state);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_raw as isize);
 
+        let _ = SetTimer(Some(hwnd), TIMER_ANIM_ID, 16, None);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
 

@@ -1,1 +1,57 @@
 @import "tailwindcss";
+
+.grainy-gradient {
+  position: relative;
+  width: 100%;
+  min-height: 500px;
+  overflow: hidden;
+  background:
+    radial-gradient(
+      ellipse 75% 65% at 18% 12%,
+      #fff5b5 0%,
+      #ffe7a5 32%,
+      transparent 72%
+    ),
+    radial-gradient(
+      ellipse 65% 80% at 78% 15%,
+      #7ed7f5 0%,
+      #a6cbed 30%,
+      transparent 72%
+    ),
+    radial-gradient(
+      ellipse 65% 60% at 82% 42%,
+      #ff397f 0%,
+      #f66b9e 35%,
+      transparent 75%
+    ),
+    radial-gradient(
+      ellipse 70% 65% at 37% 48%,
+      #ffe8bd 0%,
+      #ffbb8d 40%,
+      transparent 76%
+    ),
+    radial-gradient(
+      ellipse 65% 60% at 30% 95%,
+      #e92f64 0%,
+      #f17b9c 45%,
+      transparent 75%
+    ),
+    radial-gradient(
+      ellipse 65% 65% at 83% 100%,
+      #ffc0d4 0%,
+      #f9a6c1 45%,
+      transparent 78%
+    ),
+    #f8c8bd;
+}
+
+.grainy-gradient::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.28;
+  mix-blend-mode: soft-light;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.8'/%3E%3C/svg%3E");
+}
+

@@ -136,6 +136,7 @@ struct ThumbnailState {
 
     drag_start: Option<(i32, i32)>,
     anim: Option<ThumbAnim>,
+    font_icon: HFONT,
 }
 
 unsafe fn start_thumb_entry_anim(hwnd: HWND, target_x: i32, target_y: i32, w: i32, h: i32) {
@@ -428,6 +429,7 @@ unsafe extern "system" fn thumb_wndproc(
         WM_NCDESTROY => {
             let _ = KillTimer(Some(hwnd), TIMER_DISMISS_ID);
             let _ = KillTimer(Some(hwnd), TIMER_ANIM_ID);
+            let _ = DeleteObject(HGDIOBJ(state.font_icon.0));
             SelectObject(state.mem_hdc, state.old_bitmap);
             let _ = DeleteObject(HGDIOBJ(state.hbitmap.0));
             let _ = DeleteDC(state.mem_hdc);
@@ -443,11 +445,11 @@ fn is_close_button(x: i32, y: i32, w: i32) -> bool {
 }
 
 fn is_copy_button(x: i32, y: i32) -> bool {
-    x >= 4 && x <= 48 && y >= 4 && y <= 24
+    x >= 4 && x <= 68 && y >= 4 && y <= 24
 }
 
 unsafe fn paint_hover_ui(state: &ThumbnailState, hdc: HDC) {
-    // Close button (top right): red badge with '✕'
+    // Close button (top right): red badge with Fluent vector '✕'
     let close_rect = RECT {
         left: state.width - 24,
         top: 4,
@@ -460,25 +462,38 @@ unsafe fn paint_hover_ui(state: &ThumbnailState, hdc: HDC) {
 
     let _ = SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, COLORREF(0x00FFFFFF));
-    let mut x_text = "✕\0".encode_utf16().collect::<Vec<u16>>();
+    let old_font = SelectObject(hdc, HGDIOBJ(state.font_icon.0));
+    let mut x_text: Vec<u16> = crate::theme::icons::CLOSE.encode_utf16().chain(std::iter::once(0)).collect();
     let mut cr = close_rect;
-    DrawTextW(hdc, &mut x_text, &mut cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, &mut x_text, &mut cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-    // Copy path button (top left): dark badge with 'Copy' or 'Copied!'
+    // Copy path button (top left): dark badge with Fluent vector icon + text
     let copy_rect = RECT {
         left: 4,
         top: 4,
-        right: if state.copied_indicator { 58 } else { 48 },
+        right: if state.copied_indicator { 68 } else { 56 },
         bottom: 24,
     };
     let copy_bg = CreateSolidBrush(COLORREF(0x00222222));
     FillRect(hdc, &copy_rect, copy_bg);
     let _ = DeleteObject(HGDIOBJ(copy_bg.0));
 
-    let label = if state.copied_indicator { "Copied\0" } else { "Path\0" };
-    let mut label_w: Vec<u16> = label.encode_utf16().collect();
-    let mut lr = copy_rect;
-    DrawTextW(hdc, &mut label_w, &mut lr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    let (icon, label) = if state.copied_indicator {
+        (crate::theme::icons::CHECKMARK, "Copied")
+    } else {
+        (crate::theme::icons::COPY, "Path")
+    };
+
+    // Draw icon
+    let mut icon_w: Vec<u16> = icon.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut r_icon = RECT { left: 8, top: 4, right: 22, bottom: 24 };
+    DrawTextW(hdc, &mut icon_w, &mut r_icon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    // Draw label
+    SelectObject(hdc, old_font);
+    let mut label_w: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut r_lbl = RECT { left: 24, top: 4, right: copy_rect.right - 4, bottom: 24 };
+    DrawTextW(hdc, &mut label_w, &mut r_lbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 
 use std::os::windows::ffi::OsStrExt;
@@ -577,6 +592,7 @@ fn create_thumbnail_window(
             copied_indicator: false,
             drag_start: None,
             anim: None,
+            font_icon: crate::theme::create_icon_font(11),
         });
 
         // Styles: WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED

@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use windows::core::*;
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -11,6 +10,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config::AppConfig;
 use crate::hotkey::format_hotkey;
+use crate::theme::{self, icons, ThemeColors};
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_DPICHANGED: u32 = 0x02E0;
@@ -51,25 +51,8 @@ enum LifespanMode {
     Disabled,
 }
 
-// Refined Palette (Win32 BGR COLORREF)
-const COLOR_WINDOW_BG: COLORREF = COLORREF(0x001B1818);    // #18181B (Zinc 900)
-const COLOR_SECTION_BG: COLORREF = COLORREF(0x00242020);   // #202024 (Card surface)
-const COLOR_INPUT_BG: COLORREF = COLORREF(0x00191616);     // #161619 (Input surface)
-const COLOR_BORDER: COLORREF = COLORREF(0x003F3838);       // #38383F (Restrained border)
-const COLOR_BORDER_SUBTLE: COLORREF = COLORREF(0x00332D2D);// #2D2D33
-
-const COLOR_TEXT_PRIMARY: COLORREF = COLORREF(0x00F6F4F3); // #F3F4F6 (Crisp light)
-const COLOR_TEXT_SECONDARY: COLORREF = COLORREF(0x00AAA1A1);// #A1A1AA (Muted caption)
-const COLOR_TEXT_MUTED: COLORREF = COLORREF(0x007A7171);   // #71717A (Subdued helper)
-
-const COLOR_ACCENT_BLUE: COLORREF = COLORREF(0x00F67834);  // #3478F6 (Primary action)
-const COLOR_ACCENT_HOVER: COLORREF = COLORREF(0x00F88747); // #4787F8
-const COLOR_ACCENT_PILL_BG: COLORREF = COLORREF(0x0050301E);// #1E3050 (Subtle dark navy)
-
-const COLOR_BTN_BG: COLORREF = COLORREF(0x003C3434);       // #34343C (Neutral button)
-const COLOR_BTN_HOVER: COLORREF = COLORREF(0x004B4141);    // #41414B
-const COLOR_AMBER_BG: COLORREF = COLORREF(0x000677D9);     // #D97706 (Recording)
-const COLOR_AMBER_BORDER: COLORREF = COLORREF(0x000B9EF5); // #F59E0B
+const COLOR_AMBER_BG: COLORREF = theme::rgb(217, 119, 6);     // #D97706 (Recording)
+const COLOR_AMBER_BORDER: COLORREF = theme::rgb(245, 158, 11); // #F59E0B
 
 #[derive(Clone, Copy)]
 struct LayoutRects {
@@ -292,6 +275,7 @@ fn hit_test(pt: POINT, layout: &LayoutRects, is_timed: bool) -> Option<ButtonId>
 struct SettingsState {
     main_hwnd: HWND,
     dpi_scale: f32,
+    pub theme: ThemeColors,
 
     pending_region_mods: u32,
     pending_region_vk: u32,
@@ -312,6 +296,8 @@ struct SettingsState {
     font_body_semibold: HFONT,
     font_body: HFONT,
     font_caption: HFONT,
+    font_icon_heading: HFONT,
+    font_icon_body: HFONT,
 }
 
 impl SettingsState {
@@ -327,10 +313,13 @@ impl SettingsState {
             let font_body_semibold = create_font_px(12, 600, dpi_scale);
             let font_body = create_font_px(12, 400, dpi_scale);
             let font_caption = create_font_px(11, 400, dpi_scale);
+            let font_icon_heading = theme::create_icon_font_px(15, dpi_scale);
+            let font_icon_body = theme::create_icon_font_px(12, dpi_scale);
 
             Self {
                 main_hwnd,
                 dpi_scale,
+                theme: ThemeColors::current(),
                 pending_region_mods: cfg.region_hotkey_modifiers,
                 pending_region_vk: cfg.region_hotkey_vk,
                 pending_fullscreen_mods: cfg.fullscreen_hotkey_modifiers,
@@ -345,6 +334,8 @@ impl SettingsState {
                 font_body_semibold,
                 font_body,
                 font_caption,
+                font_icon_heading,
+                font_icon_body,
             }
         }
     }
@@ -355,11 +346,15 @@ impl SettingsState {
             let _ = DeleteObject(HGDIOBJ(self.font_body_semibold.0));
             let _ = DeleteObject(HGDIOBJ(self.font_body.0));
             let _ = DeleteObject(HGDIOBJ(self.font_caption.0));
+            let _ = DeleteObject(HGDIOBJ(self.font_icon_heading.0));
+            let _ = DeleteObject(HGDIOBJ(self.font_icon_body.0));
 
             self.font_heading = create_font_px(14, 600, self.dpi_scale);
             self.font_body_semibold = create_font_px(12, 600, self.dpi_scale);
             self.font_body = create_font_px(12, 400, self.dpi_scale);
             self.font_caption = create_font_px(11, 400, self.dpi_scale);
+            self.font_icon_heading = theme::create_icon_font_px(15, self.dpi_scale);
+            self.font_icon_body = theme::create_icon_font_px(12, self.dpi_scale);
         }
     }
 }
@@ -371,6 +366,8 @@ impl Drop for SettingsState {
             let _ = DeleteObject(HGDIOBJ(self.font_body_semibold.0));
             let _ = DeleteObject(HGDIOBJ(self.font_body.0));
             let _ = DeleteObject(HGDIOBJ(self.font_caption.0));
+            let _ = DeleteObject(HGDIOBJ(self.font_icon_heading.0));
+            let _ = DeleteObject(HGDIOBJ(self.font_icon_body.0));
         }
     }
 }
@@ -453,6 +450,63 @@ unsafe fn draw_button(
     SelectObject(hdc, old_font);
 }
 
+unsafe fn draw_icon_and_text_button(
+    hdc: HDC,
+    rect: &RECT,
+    icon: &str,
+    text: &str,
+    font_icon: HFONT,
+    font_text: HFONT,
+    bg: COLORREF,
+    color: COLORREF,
+    border: COLORREF,
+    corner_radius: i32,
+) {
+    draw_rounded_box(hdc, rect, bg, border, corner_radius);
+
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, color);
+
+    // Measure icon width
+    let old_font = SelectObject(hdc, HGDIOBJ(font_icon.0));
+    let mut icon_w: Vec<u16> = icon.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut icon_size = SIZE::default();
+    let _ = GetTextExtentPoint32W(hdc, &icon_w[..icon_w.len() - 1], &mut icon_size);
+
+    // Measure text width
+    SelectObject(hdc, HGDIOBJ(font_text.0));
+    let mut text_w: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut text_size = SIZE::default();
+    let _ = GetTextExtentPoint32W(hdc, &text_w[..text_w.len() - 1], &mut text_size);
+
+    let gap = 6;
+    let total_w = icon_size.cx + gap + text_size.cx;
+    let start_x = rect.left + ((rect.right - rect.left) - total_w).max(0) / 2;
+
+    // Draw icon
+    SelectObject(hdc, HGDIOBJ(font_icon.0));
+    let mut r_icon = RECT {
+        left: start_x,
+        top: rect.top,
+        right: start_x + icon_size.cx,
+        bottom: rect.bottom,
+    };
+    DrawTextW(hdc, &mut icon_w, &mut r_icon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    // Draw text
+    SelectObject(hdc, HGDIOBJ(font_text.0));
+    let text_x = start_x + icon_size.cx + gap;
+    let mut r_text = RECT {
+        left: text_x,
+        top: rect.top,
+        right: text_x + text_size.cx,
+        bottom: rect.bottom,
+    };
+    DrawTextW(hdc, &mut text_w, &mut r_text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SelectObject(hdc, old_font);
+}
+
 unsafe fn paint_settings(hwnd: HWND, state: &SettingsState) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
@@ -465,7 +519,7 @@ unsafe fn paint_settings(hwnd: HWND, state: &SettingsState) {
     let old_bmp = SelectObject(mem_dc, HGDIOBJ(mem_bmp.0));
 
     // Fill background
-    let bg_brush = CreateSolidBrush(COLOR_WINDOW_BG);
+    let bg_brush = CreateSolidBrush(state.theme.window_bg);
     FillRect(mem_dc, &cr, bg_brush);
     let _ = DeleteObject(HGDIOBJ(bg_brush.0));
 
@@ -475,17 +529,23 @@ unsafe fn paint_settings(hwnd: HWND, state: &SettingsState) {
     let is_timed = matches!(state.pending_lifespan, LifespanMode::Timed(_));
 
     // --- CARD 1: KEYBOARD SHORTCUTS ---
-    draw_rounded_box(mem_dc, &l.card_shortcut, COLOR_SECTION_BG, COLOR_BORDER, 8);
+    draw_rounded_box(mem_dc, &l.card_shortcut, state.theme.card_bg, state.theme.card_border, 8);
 
-    // Section title & description
-    let old_font = SelectObject(mem_dc, HGDIOBJ(state.font_heading.0));
-    SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
+    // Section title with Fluent icon
+    let old_font = SelectObject(mem_dc, HGDIOBJ(state.font_icon_heading.0));
+    SetTextColor(mem_dc, state.theme.accent);
+    let mut icon1_w: Vec<u16> = icons::KEYBOARD.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut r_icon1 = RECT { left: l.in_l, top: l.t1_y, right: l.in_l + 20, bottom: l.t1_y + 20 };
+    DrawTextW(mem_dc, &mut icon1_w, &mut r_icon1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SelectObject(mem_dc, HGDIOBJ(state.font_heading.0));
+    SetTextColor(mem_dc, state.theme.text_title);
     let mut t1: Vec<u16> = "Keyboard Shortcuts\0".encode_utf16().collect();
-    let mut r_t1 = RECT { left: l.in_l, top: l.t1_y, right: l.card_shortcut.right - 20, bottom: l.t1_y + 20 };
+    let mut r_t1 = RECT { left: l.in_l + 24, top: l.t1_y, right: l.card_shortcut.right - 20, bottom: l.t1_y + 20 };
     DrawTextW(mem_dc, &mut t1, &mut r_t1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
     SelectObject(mem_dc, HGDIOBJ(state.font_caption.0));
-    SetTextColor(mem_dc, COLOR_TEXT_SECONDARY);
+    SetTextColor(mem_dc, state.theme.text_muted);
     let mut sub1: Vec<u16> = "Global hotkeys to trigger capture actions and history\0".encode_utf16().collect();
     let mut r_sub1 = RECT { left: l.in_l, top: l.sub1_y, right: l.card_shortcut.right - 20, bottom: l.sub1_y + 18 };
     DrawTextW(mem_dc, &mut sub1, &mut r_sub1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
@@ -502,31 +562,31 @@ unsafe fn paint_settings(hwnd: HWND, state: &SettingsState) {
                              btn_hovered: bool| {
         // Label
         SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
-        SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
+        SetTextColor(mem_dc, state.theme.text_title);
         let mut lw: Vec<u16> = format!("{lbl_text}\0").encode_utf16().collect();
         let mut r_lbl = RECT { left: l.in_l, top: lbl_y, right: l.badge_l - 10, bottom: lbl_y + row_h };
         DrawTextW(mem_dc, &mut lw, &mut r_lbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         // Badge
-        let badge_border = if is_recording { COLOR_AMBER_BORDER } else { COLOR_BORDER };
-        let badge_bg = if is_recording { COLOR_AMBER_BG } else { COLOR_INPUT_BG };
+        let badge_border = if is_recording { COLOR_AMBER_BORDER } else { state.theme.card_border };
+        let badge_bg = if is_recording { COLOR_AMBER_BG } else { state.theme.input_bg };
         draw_rounded_box(mem_dc, badge_rect, badge_bg, badge_border, 6);
 
         SelectObject(mem_dc, HGDIOBJ(state.font_body_semibold.0));
-        SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
+        SetTextColor(mem_dc, if is_recording { theme::rgb(255, 255, 255) } else { state.theme.text_title });
         let mut bw: Vec<u16> = format!("{hk_str}\0").encode_utf16().collect();
         let mut r_b = *badge_rect;
         DrawTextW(mem_dc, &mut bw, &mut r_b, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         // Button
-        let (btn_txt, btn_bg, btn_border) = if is_recording {
-            ("Recording...", COLOR_AMBER_BG, COLOR_AMBER_BORDER)
+        let (btn_txt, btn_bg, btn_border, btn_txt_color) = if is_recording {
+            ("Recording...", COLOR_AMBER_BG, COLOR_AMBER_BORDER, theme::rgb(255, 255, 255))
         } else if btn_hovered {
-            ("Change", COLOR_BTN_HOVER, COLOR_BORDER)
+            ("Change", state.theme.btn_hover, state.theme.card_border, state.theme.text_title)
         } else {
-            ("Change", COLOR_BTN_BG, COLOR_BORDER)
+            ("Change", state.theme.btn_bg, state.theme.btn_border, state.theme.text_body)
         };
-        draw_button(mem_dc, btn_rect, btn_txt, state.font_body_semibold, btn_bg, COLOR_TEXT_PRIMARY, btn_border, 6);
+        draw_button(mem_dc, btn_rect, btn_txt, state.font_body_semibold, btn_bg, btn_txt_color, btn_border, 6);
     };
 
     // Row 1: Region Capture
@@ -573,33 +633,42 @@ unsafe fn paint_settings(hwnd: HWND, state: &SettingsState) {
 
     // Card 1 Footnote
     SelectObject(mem_dc, HGDIOBJ(state.font_caption.0));
-    SetTextColor(mem_dc, COLOR_TEXT_MUTED);
+    SetTextColor(mem_dc, state.theme.text_muted);
     let mut note1: Vec<u16> = "Press any key combination while recording. Esc cancels.\0".encode_utf16().collect();
     let mut r_note1 = RECT { left: l.in_l, top: l.note1_y, right: l.card_shortcut.right - 20, bottom: l.note1_y + 18 };
     DrawTextW(mem_dc, &mut note1, &mut r_note1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
     // --- CARD 2: FLOATING THUMBNAIL ---
-    draw_rounded_box(mem_dc, &l.card_thumbnail, COLOR_SECTION_BG, COLOR_BORDER, 8);
+    draw_rounded_box(mem_dc, &l.card_thumbnail, state.theme.card_bg, state.theme.card_border, 8);
+
+    // Section title with Fluent icon
+    SelectObject(mem_dc, HGDIOBJ(state.font_icon_heading.0));
+    SetTextColor(mem_dc, state.theme.accent);
+    let mut icon2_w: Vec<u16> = icons::TIMER.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut r_icon2 = RECT { left: l.in_l, top: l.t2_y, right: l.in_l + 20, bottom: l.t2_y + 20 };
+    DrawTextW(mem_dc, &mut icon2_w, &mut r_icon2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     SelectObject(mem_dc, HGDIOBJ(state.font_heading.0));
-    SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
+    SetTextColor(mem_dc, state.theme.text_title);
     let mut t2: Vec<u16> = "Floating Thumbnail\0".encode_utf16().collect();
-    let mut r_t2 = RECT { left: l.in_l, top: l.t2_y, right: l.card_thumbnail.right - 20, bottom: l.t2_y + 20 };
+    let mut r_t2 = RECT { left: l.in_l + 24, top: l.t2_y, right: l.card_thumbnail.right - 20, bottom: l.t2_y + 20 };
     DrawTextW(mem_dc, &mut t2, &mut r_t2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
     SelectObject(mem_dc, HGDIOBJ(state.font_caption.0));
-    SetTextColor(mem_dc, COLOR_TEXT_SECONDARY);
+    SetTextColor(mem_dc, state.theme.text_muted);
     let mut sub2: Vec<u16> = "Choose how long preview thumbnails stay on screen\0".encode_utf16().collect();
     let mut r_sub2 = RECT { left: l.in_l, top: l.sub2_y, right: l.card_thumbnail.right - 20, bottom: l.sub2_y + 18 };
     DrawTextW(mem_dc, &mut sub2, &mut r_sub2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
     let draw_pill = |mem_dc: HDC, rect: &RECT, text: &str, is_selected: bool, is_hover: bool| {
         let (bg, border, txt_color) = if is_selected {
-            (COLOR_ACCENT_PILL_BG, COLOR_ACCENT_BLUE, COLOR_TEXT_PRIMARY)
+            let pill_bg = if state.theme.is_dark { theme::rgb(30, 48, 80) } else { theme::rgb(224, 238, 255) };
+            let pill_txt = if state.theme.is_dark { state.theme.text_title } else { state.theme.accent };
+            (pill_bg, state.theme.accent, pill_txt)
         } else if is_hover {
-            (COLOR_BTN_HOVER, COLOR_BORDER, COLOR_TEXT_PRIMARY)
+            (state.theme.btn_hover, state.theme.card_border, state.theme.text_title)
         } else {
-            (COLOR_BTN_BG, COLOR_BORDER_SUBTLE, COLOR_TEXT_SECONDARY)
+            (state.theme.btn_bg, state.theme.btn_border, state.theme.text_body)
         };
         draw_button(mem_dc, rect, text, state.font_body_semibold, bg, txt_color, border, 6);
     };
@@ -610,39 +679,46 @@ unsafe fn paint_settings(hwnd: HWND, state: &SettingsState) {
 
     // Stepper (active & visible when Timed is selected)
     if let LifespanMode::Timed(secs) = state.pending_lifespan {
-        let dec_bg = if state.hovered_button == Some(ButtonId::LifespanDec) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
-        draw_button(mem_dc, &l.rect_lifespan_dec, "-", state.font_heading, dec_bg, COLOR_TEXT_PRIMARY, COLOR_BORDER, 6);
+        let dec_bg = if state.hovered_button == Some(ButtonId::LifespanDec) { state.theme.btn_hover } else { state.theme.btn_bg };
+        draw_button(mem_dc, &l.rect_lifespan_dec, "-", state.font_heading, dec_bg, state.theme.text_title, state.theme.btn_border, 6);
 
-        draw_rounded_box(mem_dc, &l.rect_lifespan_dur, COLOR_INPUT_BG, COLOR_BORDER, 6);
+        draw_rounded_box(mem_dc, &l.rect_lifespan_dur, state.theme.input_bg, state.theme.card_border, 6);
         SelectObject(mem_dc, HGDIOBJ(state.font_body_semibold.0));
-        SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
+        SetTextColor(mem_dc, state.theme.text_title);
         let mut dur_w: Vec<u16> = format!("{secs}s\0").encode_utf16().collect();
         let mut r_dur = l.rect_lifespan_dur;
         DrawTextW(mem_dc, &mut dur_w, &mut r_dur, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-        let inc_bg = if state.hovered_button == Some(ButtonId::LifespanInc) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
-        draw_button(mem_dc, &l.rect_lifespan_inc, "+", state.font_heading, inc_bg, COLOR_TEXT_PRIMARY, COLOR_BORDER, 6);
+        let inc_bg = if state.hovered_button == Some(ButtonId::LifespanInc) { state.theme.btn_hover } else { state.theme.btn_bg };
+        draw_button(mem_dc, &l.rect_lifespan_inc, "+", state.font_heading, inc_bg, state.theme.text_title, state.theme.btn_border, 6);
     }
 
     // --- CARD 3: SAVE LOCATION ---
-    draw_rounded_box(mem_dc, &l.card_location, COLOR_SECTION_BG, COLOR_BORDER, 8);
+    draw_rounded_box(mem_dc, &l.card_location, state.theme.card_bg, state.theme.card_border, 8);
+
+    // Section title with Fluent icon
+    SelectObject(mem_dc, HGDIOBJ(state.font_icon_heading.0));
+    SetTextColor(mem_dc, state.theme.accent);
+    let mut icon3_w: Vec<u16> = icons::FOLDER.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut r_icon3 = RECT { left: l.in_l, top: l.t3_y, right: l.in_l + 20, bottom: l.t3_y + 20 };
+    DrawTextW(mem_dc, &mut icon3_w, &mut r_icon3, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     SelectObject(mem_dc, HGDIOBJ(state.font_heading.0));
-    SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
+    SetTextColor(mem_dc, state.theme.text_title);
     let mut t3: Vec<u16> = "Save Location\0".encode_utf16().collect();
-    let mut r_t3 = RECT { left: l.in_l, top: l.t3_y, right: l.card_location.right - 20, bottom: l.t3_y + 20 };
+    let mut r_t3 = RECT { left: l.in_l + 24, top: l.t3_y, right: l.card_location.right - 20, bottom: l.t3_y + 20 };
     DrawTextW(mem_dc, &mut t3, &mut r_t3, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
     SelectObject(mem_dc, HGDIOBJ(state.font_caption.0));
-    SetTextColor(mem_dc, COLOR_TEXT_SECONDARY);
+    SetTextColor(mem_dc, state.theme.text_muted);
     let mut sub3: Vec<u16> = "Folder where full-resolution screenshots are stored\0".encode_utf16().collect();
     let mut r_sub3 = RECT { left: l.in_l, top: l.sub3_y, right: l.card_location.right - 20, bottom: l.sub3_y + 18 };
     DrawTextW(mem_dc, &mut sub3, &mut r_sub3, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
     // Path Box
-    draw_rounded_box(mem_dc, &l.rect_path, COLOR_INPUT_BG, COLOR_BORDER, 6);
+    draw_rounded_box(mem_dc, &l.rect_path, state.theme.input_bg, state.theme.card_border, 6);
     SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
-    SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
+    SetTextColor(mem_dc, state.theme.text_title);
     let path_str = state.pending_save_dir.to_string_lossy();
     let mut path_w: Vec<u16> = format!("{path_str}\0").encode_utf16().collect();
     let mut r_path = RECT {
@@ -653,19 +729,19 @@ unsafe fn paint_settings(hwnd: HWND, state: &SettingsState) {
     };
     DrawTextW(mem_dc, &mut path_w, &mut r_path, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS | DT_NOPREFIX);
 
-    // Action buttons
-    let browse_bg = if state.hovered_button == Some(ButtonId::BrowseFolder) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
-    draw_button(mem_dc, &l.rect_browse, "Browse...", state.font_body_semibold, browse_bg, COLOR_TEXT_PRIMARY, COLOR_BORDER, 6);
+    // Action buttons with Fluent vector icons
+    let browse_bg = if state.hovered_button == Some(ButtonId::BrowseFolder) { state.theme.btn_hover } else { state.theme.btn_bg };
+    draw_icon_and_text_button(mem_dc, &l.rect_browse, icons::FOLDER, "Browse...", state.font_icon_body, state.font_body_semibold, browse_bg, state.theme.text_title, state.theme.btn_border, 6);
 
-    let open_bg = if state.hovered_button == Some(ButtonId::OpenFolder) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
-    draw_button(mem_dc, &l.rect_open_folder, "Open Folder", state.font_body_semibold, open_bg, COLOR_TEXT_PRIMARY, COLOR_BORDER, 6);
+    let open_bg = if state.hovered_button == Some(ButtonId::OpenFolder) { state.theme.btn_hover } else { state.theme.btn_bg };
+    draw_icon_and_text_button(mem_dc, &l.rect_open_folder, icons::EXTERNAL, "Open Folder", state.font_icon_body, state.font_body_semibold, open_bg, state.theme.text_title, state.theme.btn_border, 6);
 
     // --- FOOTER BUTTONS ---
-    let save_bg = if state.hovered_button == Some(ButtonId::SaveApply) { COLOR_ACCENT_HOVER } else { COLOR_ACCENT_BLUE };
-    draw_button(mem_dc, &l.rect_save_apply, "Save & Apply", state.font_body_semibold, save_bg, COLOR_TEXT_PRIMARY, COLOR_ACCENT_BLUE, 6);
+    let cancel_bg = if state.hovered_button == Some(ButtonId::Cancel) { state.theme.btn_hover } else { state.theme.btn_bg };
+    draw_button(mem_dc, &l.rect_cancel, "Cancel", state.font_body_semibold, cancel_bg, state.theme.text_body, state.theme.btn_border, 6);
 
-    let cancel_bg = if state.hovered_button == Some(ButtonId::Cancel) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
-    draw_button(mem_dc, &l.rect_cancel, "Cancel", state.font_body_semibold, cancel_bg, COLOR_TEXT_SECONDARY, COLOR_BORDER, 6);
+    let save_bg = if state.hovered_button == Some(ButtonId::SaveApply) { state.theme.accent_hover } else { state.theme.accent };
+    draw_icon_and_text_button(mem_dc, &l.rect_save_apply, icons::CHECKMARK, "Save & Apply", state.font_icon_body, state.font_body_semibold, save_bg, theme::rgb(255, 255, 255), save_bg, 6);
 
     SelectObject(mem_dc, old_font);
 
@@ -693,6 +769,13 @@ unsafe extern "system" fn settings_wndproc(
 
     match msg {
         WM_ERASEBKGND => LRESULT(1),
+        theme::WM_SETTINGCHANGE | theme::WM_THEMECHANGED | theme::WM_DWMCOLORIZATIONCOLORCHANGED => {
+            let new_theme = theme::ThemeColors::current();
+            state.theme = new_theme;
+            theme::apply_window_theme(hwnd, state.theme.is_dark);
+            let _ = InvalidateRect(Some(hwnd), None, true);
+            LRESULT(0)
+        }
         WM_PAINT => {
             paint_settings(hwnd, state);
             LRESULT(0)
@@ -1005,13 +1088,8 @@ pub fn open_settings_window(main_hwnd: HWND, cfg: &AppConfig) -> Option<HWND> {
             None,
         ).ok()?;
 
-        let dark_mode: i32 = 1;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
-            &dark_mode as *const _ as *const _,
-            std::mem::size_of::<i32>() as u32,
-        );
+        let theme = theme::ThemeColors::current();
+        theme::apply_window_theme(hwnd, theme.is_dark);
 
         let state = Box::new(SettingsState::new(main_hwnd, cfg, dpi_scale));
         let state_raw = Box::into_raw(state);

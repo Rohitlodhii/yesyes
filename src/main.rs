@@ -10,6 +10,7 @@ mod hotkey;
 mod overlay;
 mod settings;
 mod storage;
+pub mod theme;
 mod thumbnail;
 mod tray;
 
@@ -285,6 +286,23 @@ unsafe extern "system" fn wndproc(
                         let _ = DestroyWindow(hwnd);
                     }
                     _ => {}
+                }
+            }
+            LRESULT(0)
+        }
+        theme::WM_SETTINGCHANGE | theme::WM_THEMECHANGED | theme::WM_DWMCOLORIZATIONCOLORCHANGED => {
+            let ctx_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppContext;
+            if !ctx_ptr.is_null() {
+                let ctx = &mut *ctx_ptr;
+                if let Some(s_hwnd) = ctx.settings_hwnd {
+                    if IsWindow(Some(s_hwnd)).as_bool() {
+                        let _ = SendMessageW(s_hwnd, msg, Some(wparam), Some(lparam));
+                    }
+                }
+                if let Some(h_hwnd) = ctx.history.sidebar_hwnd {
+                    if IsWindow(Some(h_hwnd)).as_bool() {
+                        let _ = SendMessageW(h_hwnd, msg, Some(wparam), Some(lparam));
+                    }
                 }
             }
             LRESULT(0)

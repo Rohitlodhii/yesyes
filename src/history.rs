@@ -1,13 +1,14 @@
 use std::path::{Path, PathBuf};
 use windows::core::*;
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+use crate::theme::{self, icons, ThemeColors};
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_ANIM_ID: usize = 99;
@@ -216,17 +217,6 @@ fn downscale_rgba(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) ->
     dst
 }
 
-// BGR Colors
-const COLOR_SIDEBAR_BG: COLORREF = COLORREF(0x001B1818); // #18181B
-const COLOR_CARD_BG: COLORREF = COLORREF(0x00272424);    // #242427
-const COLOR_CARD_BORDER: COLORREF = COLORREF(0x003F3838);// #38383F
-const COLOR_CARD_HOVER: COLORREF = COLORREF(0x00F6823B); // #3B82F6 (Blue)
-const COLOR_TEXT_WHITE: COLORREF = COLORREF(0x00F5F4F4);
-const COLOR_TEXT_MUTED: COLORREF = COLORREF(0x00AAA1A1);
-const COLOR_BTN_BG: COLORREF = COLORREF(0x00383333);
-const COLOR_BTN_HOVER: COLORREF = COLORREF(0x004A4444);
-const COLOR_CLOSE_RED: COLORREF = COLORREF(0x003333E5);
-
 const SIDEBAR_WIDTH: i32 = 380;
 const HEADER_HEIGHT: i32 = 65;
 const CARD_HEIGHT: i32 = 110;
@@ -261,11 +251,14 @@ struct SidebarState {
     hovered: Option<SidebarHit>,
     drag_start: Option<(i32, i32, usize)>, // x, y, card index
     anim: Option<SidebarAnim>,
+    pub theme: ThemeColors,
 
     font_title: HFONT,
     font_bold: HFONT,
     font_body: HFONT,
     font_small: HFONT,
+    font_icon: HFONT,
+    font_icon_btn: HFONT,
 }
 
 impl SidebarState {
@@ -278,10 +271,13 @@ impl SidebarState {
                 hovered: None,
                 drag_start: None,
                 anim: None,
+                theme: ThemeColors::current(),
                 font_title: create_font(17, 700),
                 font_bold: create_font(13, 600),
                 font_body: create_font(12, 400),
                 font_small: create_font(11, 400),
+                font_icon: theme::create_icon_font(15),
+                font_icon_btn: theme::create_icon_font(12),
             }
         }
     }
@@ -328,6 +324,8 @@ impl Drop for SidebarState {
             let _ = DeleteObject(HGDIOBJ(self.font_bold.0));
             let _ = DeleteObject(HGDIOBJ(self.font_body.0));
             let _ = DeleteObject(HGDIOBJ(self.font_small.0));
+            let _ = DeleteObject(HGDIOBJ(self.font_icon.0));
+            let _ = DeleteObject(HGDIOBJ(self.font_icon_btn.0));
         }
     }
 }
@@ -355,7 +353,7 @@ unsafe fn create_font(size: i32, weight: i32) -> HFONT {
 fn hit_test(pt: POINT, state: &SidebarState, count: usize) -> Option<SidebarHit> {
     // Header controls
     let close_rect = RECT { left: SIDEBAR_WIDTH - 36, top: 16, right: SIDEBAR_WIDTH - 12, bottom: 42 };
-    let clear_rect = RECT { left: SIDEBAR_WIDTH - 96, top: 16, right: SIDEBAR_WIDTH - 44, bottom: 42 };
+    let clear_rect = RECT { left: SIDEBAR_WIDTH - 100, top: 16, right: SIDEBAR_WIDTH - 44, bottom: 42 };
 
     unsafe {
         if PtInRect(&close_rect, pt).as_bool() {
@@ -380,25 +378,24 @@ fn hit_test(pt: POINT, state: &SidebarState, count: usize) -> Option<SidebarHit>
 
         if pt.y >= card_top && pt.y <= card_bottom && pt.x >= 12 && pt.x <= SIDEBAR_WIDTH - 12 {
             // Check button hits within this card
-            // Buttons row at bottom of card: y: card_bottom - 32 .. card_bottom - 8
-            let btn_top = card_bottom - 30;
-            let btn_bottom = card_bottom - 8;
+            let btn_top = card_bottom - 28;
+            let btn_bottom = card_bottom - 6;
 
             if pt.y >= btn_top && pt.y <= btn_bottom {
-                // Button 1: Copy (x: 130..178)
-                if pt.x >= 130 && pt.x <= 178 {
+                // Button 1: Copy (x: 130..168)
+                if pt.x >= 130 && pt.x <= 168 {
                     return Some(SidebarHit::CardCopy(idx));
                 }
-                // Button 2: Open (x: 184..232)
-                if pt.x >= 184 && pt.x <= 232 {
+                // Button 2: Open (x: 174..212)
+                if pt.x >= 174 && pt.x <= 212 {
                     return Some(SidebarHit::CardOpen(idx));
                 }
-                // Button 3: Path (x: 238..286)
-                if pt.x >= 238 && pt.x <= 286 {
+                // Button 3: Path (x: 218..256)
+                if pt.x >= 218 && pt.x <= 256 {
                     return Some(SidebarHit::CardPath(idx));
                 }
-                // Button 4: Delete (x: 292..325)
-                if pt.x >= 292 && pt.x <= 325 {
+                // Button 4: Delete (x: 262..300)
+                if pt.x >= 262 && pt.x <= 300 {
                     return Some(SidebarHit::CardDelete(idx));
                 }
             }
@@ -424,24 +421,76 @@ unsafe fn draw_rounded_card(hdc: HDC, rect: &RECT, bg: COLORREF, border: COLORRE
     let _ = DeleteObject(HGDIOBJ(pen.0));
 }
 
-unsafe fn draw_btn(
+unsafe fn draw_icon_btn(
     hdc: HDC,
     rect: &RECT,
-    text: &str,
+    icon: &str,
     font: HFONT,
     bg: COLORREF,
-    text_color: COLORREF,
+    icon_color: COLORREF,
     border: COLORREF,
 ) {
     draw_rounded_card(hdc, rect, bg, border);
 
     let old_font = SelectObject(hdc, HGDIOBJ(font.0));
     let _ = SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, text_color);
+    SetTextColor(hdc, icon_color);
 
-    let mut text_w: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut icon_w: Vec<u16> = icon.encode_utf16().chain(std::iter::once(0)).collect();
     let mut r = *rect;
-    DrawTextW(hdc, &mut text_w, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, &mut icon_w, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SelectObject(hdc, old_font);
+}
+
+unsafe fn draw_icon_and_text_btn(
+    hdc: HDC,
+    rect: &RECT,
+    icon: &str,
+    text: &str,
+    font_icon: HFONT,
+    font_text: HFONT,
+    bg: COLORREF,
+    color: COLORREF,
+    border: COLORREF,
+) {
+    draw_rounded_card(hdc, rect, bg, border);
+
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, color);
+
+    let old_font = SelectObject(hdc, HGDIOBJ(font_icon.0));
+    let mut icon_w: Vec<u16> = icon.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut icon_size = SIZE::default();
+    let _ = GetTextExtentPoint32W(hdc, &icon_w[..icon_w.len() - 1], &mut icon_size);
+
+    SelectObject(hdc, HGDIOBJ(font_text.0));
+    let mut text_w: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut text_size = SIZE::default();
+    let _ = GetTextExtentPoint32W(hdc, &text_w[..text_w.len() - 1], &mut text_size);
+
+    let gap = 5;
+    let total_w = icon_size.cx + gap + text_size.cx;
+    let start_x = rect.left + ((rect.right - rect.left) - total_w).max(0) / 2;
+
+    SelectObject(hdc, HGDIOBJ(font_icon.0));
+    let mut r_icon = RECT {
+        left: start_x,
+        top: rect.top,
+        right: start_x + icon_size.cx,
+        bottom: rect.bottom,
+    };
+    DrawTextW(hdc, &mut icon_w, &mut r_icon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SelectObject(hdc, HGDIOBJ(font_text.0));
+    let text_x = start_x + icon_size.cx + gap;
+    let mut r_text = RECT {
+        left: text_x,
+        top: rect.top,
+        right: text_x + text_size.cx,
+        bottom: rect.bottom,
+    };
+    DrawTextW(hdc, &mut text_w, &mut r_text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     SelectObject(hdc, old_font);
 }
@@ -458,7 +507,7 @@ unsafe fn paint_sidebar(hwnd: HWND, state: &SidebarState) {
     let old_bmp = SelectObject(mem_dc, HGDIOBJ(mem_bmp.0));
 
     // Fill background
-    let bg_brush = CreateSolidBrush(COLOR_SIDEBAR_BG);
+    let bg_brush = CreateSolidBrush(state.theme.window_bg);
     FillRect(mem_dc, &cr, bg_brush);
     let _ = DeleteObject(HGDIOBJ(bg_brush.0));
 
@@ -481,9 +530,9 @@ unsafe fn paint_sidebar(hwnd: HWND, state: &SidebarState) {
 
         let is_hovered = matches!(state.hovered, Some(SidebarHit::Card(i)) | Some(SidebarHit::CardCopy(i)) | Some(SidebarHit::CardOpen(i)) | Some(SidebarHit::CardPath(i)) | Some(SidebarHit::CardDelete(i)) if i == idx);
 
-        let border_color = if is_hovered { COLOR_CARD_HOVER } else { COLOR_CARD_BORDER };
+        let border_color = if is_hovered { state.theme.card_hover } else { state.theme.card_border };
         let card_rect = RECT { left: 12, top: card_top, right: cr.right - 12, bottom: card_bottom };
-        draw_rounded_card(mem_dc, &card_rect, COLOR_CARD_BG, border_color);
+        draw_rounded_card(mem_dc, &card_rect, state.theme.card_bg, border_color);
 
         // Blit Thumbnail on left
         let thumb_x = 22;
@@ -501,37 +550,48 @@ unsafe fn paint_sidebar(hwnd: HWND, state: &SidebarState) {
 
         // Timestamp
         let old_font = SelectObject(mem_dc, HGDIOBJ(state.font_bold.0));
-        SetTextColor(mem_dc, COLOR_TEXT_WHITE);
+        SetTextColor(mem_dc, state.theme.text_title);
         let mut time_w: Vec<u16> = format!("{}\0", entry.timestamp_str).encode_utf16().collect();
         let mut r_time = RECT { left: text_left, top: card_top + 14, right: cr.right - 20, bottom: card_top + 32 };
-        DrawTextW(mem_dc, &mut time_w, &mut r_time, DT_LEFT | DT_SINGLELINE);
+        DrawTextW(mem_dc, &mut time_w, &mut r_time, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
         // Resolution
         SelectObject(mem_dc, HGDIOBJ(state.font_small.0));
-        SetTextColor(mem_dc, COLOR_TEXT_MUTED);
+        SetTextColor(mem_dc, state.theme.text_muted);
         let mut res_w: Vec<u16> = format!("{} × {} px\0", entry.width, entry.height).encode_utf16().collect();
         let mut r_res = RECT { left: text_left, top: card_top + 34, right: cr.right - 20, bottom: card_top + 50 };
-        DrawTextW(mem_dc, &mut res_w, &mut r_res, DT_LEFT | DT_SINGLELINE);
+        DrawTextW(mem_dc, &mut res_w, &mut r_res, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
         // File name (clipped)
         let file_name = entry.file_path.file_name().unwrap_or_default().to_string_lossy();
         let mut name_w: Vec<u16> = format!("{file_name}\0").encode_utf16().collect();
         let mut r_name = RECT { left: text_left, top: card_top + 52, right: cr.right - 20, bottom: card_top + 68 };
-        DrawTextW(mem_dc, &mut name_w, &mut r_name, DT_LEFT | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+        DrawTextW(mem_dc, &mut name_w, &mut r_name, DT_LEFT | DT_SINGLELINE | DT_PATH_ELLIPSIS | DT_NOPREFIX);
 
         // Action buttons row (Copy, Open, Path, Delete)
-        let btn_top = card_bottom - 30;
-        let btn_bottom = card_bottom - 8;
+        let btn_top = card_bottom - 28;
+        let btn_bottom = card_bottom - 6;
 
         let copy_hover = state.hovered == Some(SidebarHit::CardCopy(idx));
         let open_hover = state.hovered == Some(SidebarHit::CardOpen(idx));
         let path_hover = state.hovered == Some(SidebarHit::CardPath(idx));
         let del_hover = state.hovered == Some(SidebarHit::CardDelete(idx));
 
-        draw_btn(mem_dc, &RECT { left: 130, top: btn_top, right: 178, bottom: btn_bottom }, "Copy", state.font_small, if copy_hover { COLOR_BTN_HOVER } else { COLOR_BTN_BG }, COLOR_TEXT_WHITE, COLOR_CARD_BORDER);
-        draw_btn(mem_dc, &RECT { left: 184, top: btn_top, right: 232, bottom: btn_bottom }, "Open", state.font_small, if open_hover { COLOR_BTN_HOVER } else { COLOR_BTN_BG }, COLOR_TEXT_WHITE, COLOR_CARD_BORDER);
-        draw_btn(mem_dc, &RECT { left: 238, top: btn_top, right: 286, bottom: btn_bottom }, "Path", state.font_small, if path_hover { COLOR_BTN_HOVER } else { COLOR_BTN_BG }, COLOR_TEXT_WHITE, COLOR_CARD_BORDER);
-        draw_btn(mem_dc, &RECT { left: 292, top: btn_top, right: 325, bottom: btn_bottom }, "✕", state.font_small, if del_hover { COLOR_CLOSE_RED } else { COLOR_BTN_BG }, COLOR_TEXT_WHITE, COLOR_CARD_BORDER);
+        let copy_bg = if copy_hover { state.theme.btn_hover } else { state.theme.btn_bg };
+        let copy_fg = if copy_hover { state.theme.accent } else { state.theme.text_title };
+        draw_icon_btn(mem_dc, &RECT { left: 130, top: btn_top, right: 168, bottom: btn_bottom }, icons::COPY, state.font_icon_btn, copy_bg, copy_fg, state.theme.card_border);
+
+        let open_bg = if open_hover { state.theme.btn_hover } else { state.theme.btn_bg };
+        let open_fg = if open_hover { state.theme.accent } else { state.theme.text_title };
+        draw_icon_btn(mem_dc, &RECT { left: 174, top: btn_top, right: 212, bottom: btn_bottom }, icons::EXTERNAL, state.font_icon_btn, open_bg, open_fg, state.theme.card_border);
+
+        let path_bg = if path_hover { state.theme.btn_hover } else { state.theme.btn_bg };
+        let path_fg = if path_hover { state.theme.accent } else { state.theme.text_title };
+        draw_icon_btn(mem_dc, &RECT { left: 218, top: btn_top, right: 256, bottom: btn_bottom }, icons::FOLDER, state.font_icon_btn, path_bg, path_fg, state.theme.card_border);
+
+        let del_bg = if del_hover { state.theme.close_red } else { state.theme.btn_bg };
+        let del_fg = if del_hover { theme::rgb(255, 255, 255) } else { state.theme.text_muted };
+        draw_icon_btn(mem_dc, &RECT { left: 262, top: btn_top, right: 300, bottom: btn_bottom }, icons::DELETE, state.font_icon_btn, del_bg, del_fg, state.theme.card_border);
 
         SelectObject(mem_dc, old_font);
     }
@@ -541,51 +601,60 @@ unsafe fn paint_sidebar(hwnd: HWND, state: &SidebarState) {
 
     if count == 0 {
         let old_font = SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
-        SetTextColor(mem_dc, COLOR_TEXT_MUTED);
+        SetTextColor(mem_dc, state.theme.text_muted);
         let mut empty_msg: Vec<u16> = "No screenshots taken yet.\nUse your hotkey to capture!".encode_utf16().chain(std::iter::once(0)).collect();
         let mut r_empty = RECT { left: 20, top: 200, right: cr.right - 20, bottom: 300 };
-        DrawTextW(mem_dc, &mut empty_msg, &mut r_empty, DT_CENTER | DT_WORDBREAK);
+        DrawTextW(mem_dc, &mut empty_msg, &mut r_empty, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
         SelectObject(mem_dc, old_font);
     }
 
     // --- HEADER (Drawn on top to stay fixed while scrolling) ---
     let header_rect = RECT { left: 0, top: 0, right: cr.right, bottom: HEADER_HEIGHT };
-    let h_brush = CreateSolidBrush(COLOR_SIDEBAR_BG);
+    let h_brush = CreateSolidBrush(state.theme.window_bg);
     FillRect(mem_dc, &header_rect, h_brush);
     let _ = DeleteObject(HGDIOBJ(h_brush.0));
 
     // Bottom border of header
-    let line_pen = CreatePen(PS_SOLID, 1, COLOR_CARD_BORDER);
+    let line_pen = CreatePen(PS_SOLID, 1, state.theme.card_border);
     let old_pen = SelectObject(mem_dc, HGDIOBJ(line_pen.0));
     let _ = MoveToEx(mem_dc, 0, HEADER_HEIGHT - 1, None);
     let _ = LineTo(mem_dc, cr.right, HEADER_HEIGHT - 1);
     SelectObject(mem_dc, old_pen);
     let _ = DeleteObject(HGDIOBJ(line_pen.0));
 
-    // Title
-    let old_font = SelectObject(mem_dc, HGDIOBJ(state.font_title.0));
-    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
+    // Title Icon & Text
+    let old_font = SelectObject(mem_dc, HGDIOBJ(state.font_icon.0));
+    SetTextColor(mem_dc, state.theme.accent);
+    let mut icon_hist: Vec<u16> = icons::TIMER.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut r_icon = RECT { left: 16, top: 16, right: 36, bottom: 36 };
+    DrawTextW(mem_dc, &mut icon_hist, &mut r_icon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SelectObject(mem_dc, HGDIOBJ(state.font_title.0));
+    SetTextColor(mem_dc, state.theme.text_title);
     let mut title_w: Vec<u16> = "History\0".encode_utf16().collect();
-    let mut r_title = RECT { left: 16, top: 12, right: 150, bottom: 36 };
-    DrawTextW(mem_dc, &mut title_w, &mut r_title, DT_LEFT | DT_SINGLELINE);
+    let mut r_title = RECT { left: 38, top: 12, right: 150, bottom: 36 };
+    DrawTextW(mem_dc, &mut title_w, &mut r_title, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
     // Count badge
     SelectObject(mem_dc, HGDIOBJ(state.font_small.0));
-    SetTextColor(mem_dc, COLOR_TEXT_MUTED);
+    SetTextColor(mem_dc, state.theme.text_muted);
     let count_text = format!("{count} items\0");
     let mut count_w: Vec<u16> = count_text.encode_utf16().collect();
-    let mut r_count = RECT { left: 16, top: 38, right: 150, bottom: 54 };
-    DrawTextW(mem_dc, &mut count_w, &mut r_count, DT_LEFT | DT_SINGLELINE);
+    let mut r_count = RECT { left: 38, top: 38, right: 150, bottom: 54 };
+    DrawTextW(mem_dc, &mut count_w, &mut r_count, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
     // Clear Button
     let clear_hover = state.hovered == Some(SidebarHit::ClearBtn);
-    let clear_rect = RECT { left: SIDEBAR_WIDTH - 96, top: 16, right: SIDEBAR_WIDTH - 44, bottom: 42 };
-    draw_btn(mem_dc, &clear_rect, "Clear", state.font_small, if clear_hover { COLOR_BTN_HOVER } else { COLOR_BTN_BG }, COLOR_TEXT_WHITE, COLOR_CARD_BORDER);
+    let clear_rect = RECT { left: SIDEBAR_WIDTH - 100, top: 16, right: SIDEBAR_WIDTH - 44, bottom: 42 };
+    let clear_bg = if clear_hover { state.theme.btn_hover } else { state.theme.btn_bg };
+    draw_icon_and_text_btn(mem_dc, &clear_rect, icons::CLEAR, "Clear", state.font_icon_btn, state.font_small, clear_bg, state.theme.text_title, state.theme.card_border);
 
-    // Close Button (✕)
+    // Close Button (Fluent Vector Close Icon)
     let close_hover = state.hovered == Some(SidebarHit::CloseBtn);
     let close_rect = RECT { left: SIDEBAR_WIDTH - 36, top: 16, right: SIDEBAR_WIDTH - 12, bottom: 42 };
-    draw_btn(mem_dc, &close_rect, "✕", state.font_bold, if close_hover { COLOR_CLOSE_RED } else { COLOR_BTN_BG }, COLOR_TEXT_WHITE, COLOR_CARD_BORDER);
+    let close_bg = if close_hover { state.theme.close_red } else { state.theme.btn_bg };
+    let close_fg = if close_hover { theme::rgb(255, 255, 255) } else { state.theme.text_title };
+    draw_icon_btn(mem_dc, &close_rect, icons::CLOSE, state.font_icon, close_bg, close_fg, state.theme.card_border);
 
     SelectObject(mem_dc, old_font);
 
@@ -614,6 +683,13 @@ unsafe extern "system" fn sidebar_wndproc(
 
     match msg {
         WM_ERASEBKGND => LRESULT(1),
+        theme::WM_SETTINGCHANGE | theme::WM_THEMECHANGED | theme::WM_DWMCOLORIZATIONCOLORCHANGED => {
+            let new_theme = theme::ThemeColors::current();
+            state.theme = new_theme;
+            theme::apply_window_theme(hwnd, state.theme.is_dark);
+            let _ = InvalidateRect(Some(hwnd), None, true);
+            LRESULT(0)
+        }
         WM_TIMER => {
             if wparam.0 == TIMER_ANIM_ID {
                 if let Some(anim) = &mut state.anim {
@@ -900,13 +976,8 @@ pub fn open_sidebar_window(main_hwnd: HWND, history_ptr: *mut HistoryManager) ->
 
         let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
 
-        let dark_mode: i32 = 1;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
-            &dark_mode as *const _ as *const _,
-            std::mem::size_of::<i32>() as u32,
-        );
+        let theme = theme::ThemeColors::current();
+        theme::apply_window_theme(hwnd, theme.is_dark);
 
         let mut state = Box::new(SidebarState::new(main_hwnd, history_ptr));
         state.anim = Some(SidebarAnim {

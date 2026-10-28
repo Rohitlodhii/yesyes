@@ -13,6 +13,13 @@ use crate::config::AppConfig;
 use crate::hotkey::format_hotkey;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_DPICHANGED: u32 = 0x02E0;
+
+pub const WM_SNAPDOCK_SETTINGS_SAVED: u32 = WM_APP + 5;
+
+// Base unscaled layout dimensions (at 100% DPI, 96 DPI)
+const BASE_WIN_W: i32 = 540;
+const BASE_WIN_H: i32 = 592;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecordingTarget {
@@ -44,9 +51,247 @@ enum LifespanMode {
     Disabled,
 }
 
+// Refined Palette (Win32 BGR COLORREF)
+const COLOR_WINDOW_BG: COLORREF = COLORREF(0x001B1818);    // #18181B (Zinc 900)
+const COLOR_SECTION_BG: COLORREF = COLORREF(0x00242020);   // #202024 (Card surface)
+const COLOR_INPUT_BG: COLORREF = COLORREF(0x00191616);     // #161619 (Input surface)
+const COLOR_BORDER: COLORREF = COLORREF(0x003F3838);       // #38383F (Restrained border)
+const COLOR_BORDER_SUBTLE: COLORREF = COLORREF(0x00332D2D);// #2D2D33
+
+const COLOR_TEXT_PRIMARY: COLORREF = COLORREF(0x00F6F4F3); // #F3F4F6 (Crisp light)
+const COLOR_TEXT_SECONDARY: COLORREF = COLORREF(0x00AAA1A1);// #A1A1AA (Muted caption)
+const COLOR_TEXT_MUTED: COLORREF = COLORREF(0x007A7171);   // #71717A (Subdued helper)
+
+const COLOR_ACCENT_BLUE: COLORREF = COLORREF(0x00F67834);  // #3478F6 (Primary action)
+const COLOR_ACCENT_HOVER: COLORREF = COLORREF(0x00F88747); // #4787F8
+const COLOR_ACCENT_PILL_BG: COLORREF = COLORREF(0x0050301E);// #1E3050 (Subtle dark navy)
+
+const COLOR_BTN_BG: COLORREF = COLORREF(0x003C3434);       // #34343C (Neutral button)
+const COLOR_BTN_HOVER: COLORREF = COLORREF(0x004B4141);    // #41414B
+const COLOR_AMBER_BG: COLORREF = COLORREF(0x000677D9);     // #D97706 (Recording)
+const COLOR_AMBER_BORDER: COLORREF = COLORREF(0x000B9EF5); // #F59E0B
+
+#[derive(Clone, Copy)]
+struct LayoutRects {
+    card_shortcut: RECT,
+    rect_change_region: RECT,
+    rect_change_fullscreen: RECT,
+    rect_change_history: RECT,
+    rect_badge_region: RECT,
+    rect_badge_fullscreen: RECT,
+    rect_badge_history: RECT,
+
+    card_thumbnail: RECT,
+    rect_lifespan_inf: RECT,
+    rect_lifespan_timed: RECT,
+    rect_lifespan_dis: RECT,
+    rect_lifespan_dec: RECT,
+    rect_lifespan_dur: RECT,
+    rect_lifespan_inc: RECT,
+
+    card_location: RECT,
+    rect_path: RECT,
+    rect_browse: RECT,
+    rect_open_folder: RECT,
+
+    rect_save_apply: RECT,
+    rect_cancel: RECT,
+
+    // Coordinates for text placement
+    t1_y: i32,
+    sub1_y: i32,
+    in_l: i32,
+    badge_l: i32,
+    r1_y: i32,
+    r2_y: i32,
+    r3_y: i32,
+    note1_y: i32,
+
+    t2_y: i32,
+    sub2_y: i32,
+
+    t3_y: i32,
+    sub3_y: i32,
+}
+
+fn compute_layout(cr: &RECT, s: f32) -> LayoutRects {
+    let scale = |v: i32| -> i32 { (v as f32 * s).round() as i32 };
+
+    let m_x = scale(20);
+    let card_l = m_x;
+    let card_r = cr.right - m_x;
+
+    let in_pad = scale(16);
+    let in_l = card_l + in_pad;
+    let in_r = card_r - in_pad;
+
+    // --- CARD 1: KEYBOARD SHORTCUTS ---
+    let c1_top = scale(18);
+    let t1_y = c1_top + scale(16);
+    let sub1_y = t1_y + scale(22);
+
+    let row_h = scale(32);
+    let row_gap = scale(8);
+    let r1_y = sub1_y + scale(24);
+    let r2_y = r1_y + row_h + row_gap;
+    let r3_y = r2_y + row_h + row_gap;
+
+    let btn_w = scale(92);
+    let btn_l = in_r - btn_w;
+    let btn_r = in_r;
+
+    let badge_l = in_l + scale(134);
+    let badge_r = btn_l - scale(10);
+
+    let note1_y = r3_y + row_h + scale(10);
+    let c1_bot = note1_y + scale(22);
+
+    // --- CARD 2: FLOATING THUMBNAIL ---
+    let c2_top = c1_bot + scale(12);
+    let t2_y = c2_top + scale(16);
+    let sub2_y = t2_y + scale(22);
+
+    let opt_y = sub2_y + scale(22);
+    let opt_h = scale(32);
+
+    let pill_inf_w = scale(142);
+    let pill_timed_w = scale(78);
+    let pill_dis_w = scale(78);
+    let pill_gap = scale(8);
+
+    let p1_l = in_l;
+    let p1_r = p1_l + pill_inf_w;
+    let p2_l = p1_r + pill_gap;
+    let p2_r = p2_l + pill_timed_w;
+    let p3_l = p2_r + pill_gap;
+    let p3_r = p3_l + pill_dis_w;
+
+    // Stepper controls
+    let step_dec_l = p3_r + scale(14);
+    let step_dec_r = step_dec_l + scale(28);
+    let step_dur_l = step_dec_r + scale(4);
+    let step_dur_r = step_dur_l + scale(54);
+    let step_inc_l = step_dur_r + scale(4);
+    let step_inc_r = step_inc_l + scale(28);
+
+    let c2_bot = opt_y + opt_h + scale(16);
+
+    // --- CARD 3: SAVE LOCATION ---
+    let c3_top = c2_bot + scale(12);
+    let t3_y = c3_top + scale(16);
+    let sub3_y = t3_y + scale(22);
+
+    let path_y = sub3_y + scale(22);
+    let path_h = scale(32);
+
+    let sub_btn_y = path_y + path_h + scale(10);
+    let sub_btn_h = scale(30);
+    let browse_w = scale(90);
+    let open_w = scale(106);
+
+    let c3_bot = sub_btn_y + sub_btn_h + scale(16);
+
+    // --- FOOTER ACTION BAR ---
+    let foot_gap = scale(16);
+    let foot_y = c3_bot + foot_gap;
+    let foot_h = scale(32);
+
+    let cancel_w = scale(80);
+    let save_w = scale(118);
+    let cancel_r = card_r;
+    let cancel_l = cancel_r - cancel_w;
+    let save_r = cancel_l - scale(10);
+    let save_l = save_r - save_w;
+
+    LayoutRects {
+        card_shortcut: RECT { left: card_l, top: c1_top, right: card_r, bottom: c1_bot },
+        rect_change_region: RECT { left: btn_l, top: r1_y, right: btn_r, bottom: r1_y + row_h },
+        rect_change_fullscreen: RECT { left: btn_l, top: r2_y, right: btn_r, bottom: r2_y + row_h },
+        rect_change_history: RECT { left: btn_l, top: r3_y, right: btn_r, bottom: r3_y + row_h },
+        rect_badge_region: RECT { left: badge_l, top: r1_y, right: badge_r, bottom: r1_y + row_h },
+        rect_badge_fullscreen: RECT { left: badge_l, top: r2_y, right: badge_r, bottom: r2_y + row_h },
+        rect_badge_history: RECT { left: badge_l, top: r3_y, right: badge_r, bottom: r3_y + row_h },
+
+        card_thumbnail: RECT { left: card_l, top: c2_top, right: card_r, bottom: c2_bot },
+        rect_lifespan_inf: RECT { left: p1_l, top: opt_y, right: p1_r, bottom: opt_y + opt_h },
+        rect_lifespan_timed: RECT { left: p2_l, top: opt_y, right: p2_r, bottom: opt_y + opt_h },
+        rect_lifespan_dis: RECT { left: p3_l, top: opt_y, right: p3_r, bottom: opt_y + opt_h },
+        rect_lifespan_dec: RECT { left: step_dec_l, top: opt_y, right: step_dec_r, bottom: opt_y + opt_h },
+        rect_lifespan_dur: RECT { left: step_dur_l, top: opt_y, right: step_dur_r, bottom: opt_y + opt_h },
+        rect_lifespan_inc: RECT { left: step_inc_l, top: opt_y, right: step_inc_r, bottom: opt_y + opt_h },
+
+        card_location: RECT { left: card_l, top: c3_top, right: card_r, bottom: c3_bot },
+        rect_path: RECT { left: in_l, top: path_y, right: in_r, bottom: path_y + path_h },
+        rect_browse: RECT { left: in_l, top: sub_btn_y, right: in_l + browse_w, bottom: sub_btn_y + sub_btn_h },
+        rect_open_folder: RECT { left: in_l + browse_w + scale(10), top: sub_btn_y, right: in_l + browse_w + scale(10) + open_w, bottom: sub_btn_y + sub_btn_h },
+
+        rect_save_apply: RECT { left: save_l, top: foot_y, right: save_r, bottom: foot_y + foot_h },
+        rect_cancel: RECT { left: cancel_l, top: foot_y, right: cancel_r, bottom: foot_y + foot_h },
+
+        t1_y,
+        sub1_y,
+        in_l,
+        badge_l,
+        r1_y,
+        r2_y,
+        r3_y,
+        note1_y,
+
+        t2_y,
+        sub2_y,
+
+        t3_y,
+        sub3_y,
+    }
+}
+
+fn hit_test(pt: POINT, layout: &LayoutRects, is_timed: bool) -> Option<ButtonId> {
+    unsafe {
+        if PtInRect(&layout.rect_change_region, pt).as_bool() {
+            return Some(ButtonId::ChangeRegionHotkey);
+        }
+        if PtInRect(&layout.rect_change_fullscreen, pt).as_bool() {
+            return Some(ButtonId::ChangeFullscreenHotkey);
+        }
+        if PtInRect(&layout.rect_change_history, pt).as_bool() {
+            return Some(ButtonId::ChangeHistoryHotkey);
+        }
+        if PtInRect(&layout.rect_lifespan_inf, pt).as_bool() {
+            return Some(ButtonId::LifespanInfinite);
+        }
+        if PtInRect(&layout.rect_lifespan_timed, pt).as_bool() {
+            return Some(ButtonId::LifespanTimed);
+        }
+        if PtInRect(&layout.rect_lifespan_dis, pt).as_bool() {
+            return Some(ButtonId::LifespanDisabled);
+        }
+        if is_timed {
+            if PtInRect(&layout.rect_lifespan_dec, pt).as_bool() {
+                return Some(ButtonId::LifespanDec);
+            }
+            if PtInRect(&layout.rect_lifespan_inc, pt).as_bool() {
+                return Some(ButtonId::LifespanInc);
+            }
+        }
+        if PtInRect(&layout.rect_browse, pt).as_bool() {
+            return Some(ButtonId::BrowseFolder);
+        }
+        if PtInRect(&layout.rect_open_folder, pt).as_bool() {
+            return Some(ButtonId::OpenFolder);
+        }
+        if PtInRect(&layout.rect_save_apply, pt).as_bool() {
+            return Some(ButtonId::SaveApply);
+        }
+        if PtInRect(&layout.rect_cancel, pt).as_bool() {
+            return Some(ButtonId::Cancel);
+        }
+    }
+    None
+}
+
 struct SettingsState {
     main_hwnd: HWND,
-    _current_config: AppConfig,
+    dpi_scale: f32,
 
     pending_region_mods: u32,
     pending_region_vk: u32,
@@ -63,14 +308,14 @@ struct SettingsState {
     recording_target: Option<RecordingTarget>,
     hovered_button: Option<ButtonId>,
 
-    font_title: HFONT,
-    font_section: HFONT,
+    font_heading: HFONT,
+    font_body_semibold: HFONT,
     font_body: HFONT,
-    font_badge: HFONT,
+    font_caption: HFONT,
 }
 
 impl SettingsState {
-    fn new(main_hwnd: HWND, cfg: &AppConfig) -> Self {
+    fn new(main_hwnd: HWND, cfg: &AppConfig, dpi_scale: f32) -> Self {
         let lifespan_mode = match cfg.thumbnail_lifespan_secs {
             None => LifespanMode::Infinite,
             Some(0) => LifespanMode::Disabled,
@@ -78,14 +323,14 @@ impl SettingsState {
         };
 
         unsafe {
-            let font_title = create_font(18, 700);
-            let font_section = create_font(14, 600);
-            let font_body = create_font(13, 400);
-            let font_badge = create_font(13, 600);
+            let font_heading = create_font_px(14, 600, dpi_scale);
+            let font_body_semibold = create_font_px(12, 600, dpi_scale);
+            let font_body = create_font_px(12, 400, dpi_scale);
+            let font_caption = create_font_px(11, 400, dpi_scale);
 
             Self {
                 main_hwnd,
-                _current_config: cfg.clone(),
+                dpi_scale,
                 pending_region_mods: cfg.region_hotkey_modifiers,
                 pending_region_vk: cfg.region_hotkey_vk,
                 pending_fullscreen_mods: cfg.fullscreen_hotkey_modifiers,
@@ -96,11 +341,25 @@ impl SettingsState {
                 pending_save_dir: cfg.save_directory.clone(),
                 recording_target: None,
                 hovered_button: None,
-                font_title,
-                font_section,
+                font_heading,
+                font_body_semibold,
                 font_body,
-                font_badge,
+                font_caption,
             }
+        }
+    }
+
+    fn reload_fonts(&mut self) {
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(self.font_heading.0));
+            let _ = DeleteObject(HGDIOBJ(self.font_body_semibold.0));
+            let _ = DeleteObject(HGDIOBJ(self.font_body.0));
+            let _ = DeleteObject(HGDIOBJ(self.font_caption.0));
+
+            self.font_heading = create_font_px(14, 600, self.dpi_scale);
+            self.font_body_semibold = create_font_px(12, 600, self.dpi_scale);
+            self.font_body = create_font_px(12, 400, self.dpi_scale);
+            self.font_caption = create_font_px(11, 400, self.dpi_scale);
         }
     }
 }
@@ -108,18 +367,20 @@ impl SettingsState {
 impl Drop for SettingsState {
     fn drop(&mut self) {
         unsafe {
-            let _ = DeleteObject(HGDIOBJ(self.font_title.0));
-            let _ = DeleteObject(HGDIOBJ(self.font_section.0));
+            let _ = DeleteObject(HGDIOBJ(self.font_heading.0));
+            let _ = DeleteObject(HGDIOBJ(self.font_body_semibold.0));
             let _ = DeleteObject(HGDIOBJ(self.font_body.0));
-            let _ = DeleteObject(HGDIOBJ(self.font_badge.0));
+            let _ = DeleteObject(HGDIOBJ(self.font_caption.0));
         }
     }
 }
 
-unsafe fn create_font(size: i32, weight: i32) -> HFONT {
+unsafe fn create_font_px(size_px: i32, weight: i32, scale: f32) -> HFONT {
     let font_name: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
+    let scaled_height = (size_px as f32 * scale).round() as i32;
+
     CreateFontW(
-        -size,
+        -scaled_height,
         0,
         0,
         0,
@@ -135,19 +396,6 @@ unsafe fn create_font(size: i32, weight: i32) -> HFONT {
         PCWSTR(font_name.as_ptr()),
     )
 }
-
-// BGR color constants for Win32 COLORREF
-const COLOR_BG: COLORREF = COLORREF(0x001B1818);         // #18181B (Zinc 900)
-const COLOR_CARD: COLORREF = COLORREF(0x002A2727);       // #27272A (Zinc 800)
-const COLOR_CARD_BORDER: COLORREF = COLORREF(0x00463F3F);// #3F3F46 (Zinc 700)
-const COLOR_TEXT_WHITE: COLORREF = COLORREF(0x00F5F4F4); // #F4F4F5
-const COLOR_TEXT_MUTED: COLORREF = COLORREF(0x00AAA1A1); // #A1A1AA
-const COLOR_PRIMARY: COLORREF = COLORREF(0x00EB6325);    // #2563EB (Blue 600)
-const COLOR_PRIMARY_HOVER: COLORREF = COLORREF(0x00F6823B); // #3B82F6 (Blue 500)
-const COLOR_ACTIVE_PILL: COLORREF = COLORREF(0x006E3B1E);   // Dark Blue highlight
-const COLOR_BTN_BG: COLORREF = COLORREF(0x003F3737);     // #37373F
-const COLOR_BTN_HOVER: COLORREF = COLORREF(0x00524C4C);  // #4C4C52
-const COLOR_AMBER: COLORREF = COLORREF(0x000B9EF5);      // #F59E0B (Amber)
 
 pub fn pick_folder(parent: HWND) -> Option<PathBuf> {
     unsafe {
@@ -168,77 +416,13 @@ pub fn pick_folder(parent: HWND) -> Option<PathBuf> {
     }
 }
 
-// Layout coordinate constants (Window width = 560, height = 680)
-const WIN_W: i32 = 560;
-const WIN_H: i32 = 680;
-
-// Hitbox Rectangles
-const RECT_CHANGE_REGION: RECT = RECT { left: 405, top: 76, right: 520, bottom: 108 };
-const RECT_CHANGE_FULLSCREEN: RECT = RECT { left: 405, top: 121, right: 520, bottom: 153 };
-const RECT_CHANGE_HISTORY: RECT = RECT { left: 405, top: 166, right: 520, bottom: 198 };
-
-const RECT_LIFESPAN_INF: RECT = RECT { left: 40, top: 310, right: 180, bottom: 345 };
-const RECT_LIFESPAN_TIMED: RECT = RECT { left: 195, top: 310, right: 305, bottom: 345 };
-const RECT_LIFESPAN_DIS: RECT = RECT { left: 320, top: 310, right: 440, bottom: 345 };
-
-const RECT_LIFESPAN_DEC: RECT = RECT { left: 195, top: 355, right: 230, bottom: 385 };
-const RECT_LIFESPAN_INC: RECT = RECT { left: 330, top: 355, right: 365, bottom: 385 };
-
-const RECT_BROWSE_FOLDER: RECT = RECT { left: 40, top: 512, right: 150, bottom: 544 };
-const RECT_OPEN_FOLDER: RECT = RECT { left: 160, top: 512, right: 270, bottom: 544 };
-
-const RECT_SAVE_APPLY: RECT = RECT { left: 280, top: 590, right: 425, bottom: 630 };
-const RECT_CANCEL: RECT = RECT { left: 440, top: 590, right: 520, bottom: 630 };
-
-fn hit_test(pt: POINT) -> Option<ButtonId> {
-    unsafe {
-        if PtInRect(&RECT_CHANGE_REGION, pt).as_bool() {
-            return Some(ButtonId::ChangeRegionHotkey);
-        }
-        if PtInRect(&RECT_CHANGE_FULLSCREEN, pt).as_bool() {
-            return Some(ButtonId::ChangeFullscreenHotkey);
-        }
-        if PtInRect(&RECT_CHANGE_HISTORY, pt).as_bool() {
-            return Some(ButtonId::ChangeHistoryHotkey);
-        }
-        if PtInRect(&RECT_LIFESPAN_INF, pt).as_bool() {
-            return Some(ButtonId::LifespanInfinite);
-        }
-        if PtInRect(&RECT_LIFESPAN_TIMED, pt).as_bool() {
-            return Some(ButtonId::LifespanTimed);
-        }
-        if PtInRect(&RECT_LIFESPAN_DIS, pt).as_bool() {
-            return Some(ButtonId::LifespanDisabled);
-        }
-        if PtInRect(&RECT_LIFESPAN_DEC, pt).as_bool() {
-            return Some(ButtonId::LifespanDec);
-        }
-        if PtInRect(&RECT_LIFESPAN_INC, pt).as_bool() {
-            return Some(ButtonId::LifespanInc);
-        }
-        if PtInRect(&RECT_BROWSE_FOLDER, pt).as_bool() {
-            return Some(ButtonId::BrowseFolder);
-        }
-        if PtInRect(&RECT_OPEN_FOLDER, pt).as_bool() {
-            return Some(ButtonId::OpenFolder);
-        }
-        if PtInRect(&RECT_SAVE_APPLY, pt).as_bool() {
-            return Some(ButtonId::SaveApply);
-        }
-        if PtInRect(&RECT_CANCEL, pt).as_bool() {
-            return Some(ButtonId::Cancel);
-        }
-    }
-    None
-}
-
-unsafe fn draw_rounded_card(hdc: HDC, rect: &RECT, bg: COLORREF, border: COLORREF) {
+unsafe fn draw_rounded_box(hdc: HDC, rect: &RECT, bg: COLORREF, border: COLORREF, corner_radius: i32) {
     let brush = CreateSolidBrush(bg);
     let pen = CreatePen(PS_SOLID, 1, border);
     let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
     let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
 
-    let _ = RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
+    let _ = RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, corner_radius, corner_radius);
 
     SelectObject(hdc, old_brush);
     SelectObject(hdc, old_pen);
@@ -254,8 +438,9 @@ unsafe fn draw_button(
     bg: COLORREF,
     text_color: COLORREF,
     border: COLORREF,
+    corner_radius: i32,
 ) {
-    draw_rounded_card(hdc, rect, bg, border);
+    draw_rounded_box(hdc, rect, bg, border, corner_radius);
 
     let old_font = SelectObject(hdc, HGDIOBJ(font.0));
     let _ = SetBkMode(hdc, TRANSPARENT);
@@ -263,7 +448,7 @@ unsafe fn draw_button(
 
     let mut text_w: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let mut r = *rect;
-    DrawTextW(hdc, &mut text_w, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, &mut text_w, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     SelectObject(hdc, old_font);
 }
@@ -280,183 +465,207 @@ unsafe fn paint_settings(hwnd: HWND, state: &SettingsState) {
     let old_bmp = SelectObject(mem_dc, HGDIOBJ(mem_bmp.0));
 
     // Fill background
-    let bg_brush = CreateSolidBrush(COLOR_BG);
+    let bg_brush = CreateSolidBrush(COLOR_WINDOW_BG);
     FillRect(mem_dc, &cr, bg_brush);
     let _ = DeleteObject(HGDIOBJ(bg_brush.0));
 
     let _ = SetBkMode(mem_dc, TRANSPARENT);
 
+    let l = compute_layout(&cr, state.dpi_scale);
+    let is_timed = matches!(state.pending_lifespan, LifespanMode::Timed(_));
+
     // --- CARD 1: KEYBOARD SHORTCUTS ---
-    let card1 = RECT { left: 24, top: 16, right: cr.right - 24, bottom: 250 };
-    draw_rounded_card(mem_dc, &card1, COLOR_CARD, COLOR_CARD_BORDER);
+    draw_rounded_box(mem_dc, &l.card_shortcut, COLOR_SECTION_BG, COLOR_BORDER, 8);
 
-    let old_font = SelectObject(mem_dc, HGDIOBJ(state.font_section.0));
-    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
-    let mut t1: Vec<u16> = "KEYBOARD SHORTCUTS\0".encode_utf16().collect();
-    let mut r1 = RECT { left: 40, top: 28, right: 300, bottom: 48 };
-    DrawTextW(mem_dc, &mut t1, &mut r1, DT_LEFT | DT_SINGLELINE);
+    // Section title & description
+    let old_font = SelectObject(mem_dc, HGDIOBJ(state.font_heading.0));
+    SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
+    let mut t1: Vec<u16> = "Keyboard Shortcuts\0".encode_utf16().collect();
+    let mut r_t1 = RECT { left: l.in_l, top: l.t1_y, right: l.card_shortcut.right - 20, bottom: l.t1_y + 20 };
+    DrawTextW(mem_dc, &mut t1, &mut r_t1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
-    SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
-    SetTextColor(mem_dc, COLOR_TEXT_MUTED);
+    SelectObject(mem_dc, HGDIOBJ(state.font_caption.0));
+    SetTextColor(mem_dc, COLOR_TEXT_SECONDARY);
     let mut sub1: Vec<u16> = "Global hotkeys to trigger capture actions and history\0".encode_utf16().collect();
-    let mut r_sub1 = RECT { left: 40, top: 48, right: 460, bottom: 68 };
-    DrawTextW(mem_dc, &mut sub1, &mut r_sub1, DT_LEFT | DT_SINGLELINE);
+    let mut r_sub1 = RECT { left: l.in_l, top: l.sub1_y, right: l.card_shortcut.right - 20, bottom: l.sub1_y + 18 };
+    DrawTextW(mem_dc, &mut sub1, &mut r_sub1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+
+    let row_h = l.rect_change_region.bottom - l.rect_change_region.top;
+
+    let draw_shortcut_row = |mem_dc: HDC,
+                             lbl_text: &str,
+                             lbl_y: i32,
+                             badge_rect: &RECT,
+                             btn_rect: &RECT,
+                             hk_str: &str,
+                             is_recording: bool,
+                             btn_hovered: bool| {
+        // Label
+        SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
+        SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
+        let mut lw: Vec<u16> = format!("{lbl_text}\0").encode_utf16().collect();
+        let mut r_lbl = RECT { left: l.in_l, top: lbl_y, right: l.badge_l - 10, bottom: lbl_y + row_h };
+        DrawTextW(mem_dc, &mut lw, &mut r_lbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        // Badge
+        let badge_border = if is_recording { COLOR_AMBER_BORDER } else { COLOR_BORDER };
+        let badge_bg = if is_recording { COLOR_AMBER_BG } else { COLOR_INPUT_BG };
+        draw_rounded_box(mem_dc, badge_rect, badge_bg, badge_border, 6);
+
+        SelectObject(mem_dc, HGDIOBJ(state.font_body_semibold.0));
+        SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
+        let mut bw: Vec<u16> = format!("{hk_str}\0").encode_utf16().collect();
+        let mut r_b = *badge_rect;
+        DrawTextW(mem_dc, &mut bw, &mut r_b, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        // Button
+        let (btn_txt, btn_bg, btn_border) = if is_recording {
+            ("Recording...", COLOR_AMBER_BG, COLOR_AMBER_BORDER)
+        } else if btn_hovered {
+            ("Change", COLOR_BTN_HOVER, COLOR_BORDER)
+        } else {
+            ("Change", COLOR_BTN_BG, COLOR_BORDER)
+        };
+        draw_button(mem_dc, btn_rect, btn_txt, state.font_body_semibold, btn_bg, COLOR_TEXT_PRIMARY, btn_border, 6);
+    };
 
     // Row 1: Region Capture
-    SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
-    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
-    let mut lbl1: Vec<u16> = "Region Capture\0".encode_utf16().collect();
-    let mut r_lbl1 = RECT { left: 40, top: 82, right: 200, bottom: 104 };
-    DrawTextW(mem_dc, &mut lbl1, &mut r_lbl1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    let reg_badge_rect = RECT { left: 200, top: 76, right: 395, bottom: 108 };
-    draw_rounded_card(mem_dc, &reg_badge_rect, COLOR_BG, COLOR_PRIMARY);
-    SelectObject(mem_dc, HGDIOBJ(state.font_badge.0));
-    let reg_hk_str = format_hotkey(state.pending_region_mods, state.pending_region_vk);
-    let mut reg_hk_w: Vec<u16> = format!("{reg_hk_str}\0").encode_utf16().collect();
-    let mut r_rhk = reg_badge_rect;
-    DrawTextW(mem_dc, &mut reg_hk_w, &mut r_rhk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
     let is_rec_reg = state.recording_target == Some(RecordingTarget::Region);
-    let (reg_btn_txt, reg_btn_bg) = if is_rec_reg { ("Press keys...", COLOR_AMBER) } else if state.hovered_button == Some(ButtonId::ChangeRegionHotkey) { ("Change...", COLOR_BTN_HOVER) } else { ("Change...", COLOR_BTN_BG) };
-    draw_button(mem_dc, &RECT_CHANGE_REGION, reg_btn_txt, state.font_section, reg_btn_bg, COLOR_TEXT_WHITE, if is_rec_reg { COLOR_AMBER } else { COLOR_CARD_BORDER });
+    let reg_hk_str = format_hotkey(state.pending_region_mods, state.pending_region_vk);
+    draw_shortcut_row(
+        mem_dc,
+        "Region Capture",
+        l.r1_y,
+        &l.rect_badge_region,
+        &l.rect_change_region,
+        &reg_hk_str,
+        is_rec_reg,
+        state.hovered_button == Some(ButtonId::ChangeRegionHotkey),
+    );
 
-    // Row 2: Full Screen Capture
-    SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
-    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
-    let mut lbl2: Vec<u16> = "Full Screen\0".encode_utf16().collect();
-    let mut r_lbl2 = RECT { left: 40, top: 127, right: 200, bottom: 149 };
-    DrawTextW(mem_dc, &mut lbl2, &mut r_lbl2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    let fs_badge_rect = RECT { left: 200, top: 121, right: 395, bottom: 153 };
-    draw_rounded_card(mem_dc, &fs_badge_rect, COLOR_BG, COLOR_PRIMARY);
-    SelectObject(mem_dc, HGDIOBJ(state.font_badge.0));
-    let fs_hk_str = format_hotkey(state.pending_fullscreen_mods, state.pending_fullscreen_vk);
-    let mut fs_hk_w: Vec<u16> = format!("{fs_hk_str}\0").encode_utf16().collect();
-    let mut r_fshk = fs_badge_rect;
-    DrawTextW(mem_dc, &mut fs_hk_w, &mut r_fshk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
+    // Row 2: Full Screen
     let is_rec_fs = state.recording_target == Some(RecordingTarget::Fullscreen);
-    let (fs_btn_txt, fs_btn_bg) = if is_rec_fs { ("Press keys...", COLOR_AMBER) } else if state.hovered_button == Some(ButtonId::ChangeFullscreenHotkey) { ("Change...", COLOR_BTN_HOVER) } else { ("Change...", COLOR_BTN_BG) };
-    draw_button(mem_dc, &RECT_CHANGE_FULLSCREEN, fs_btn_txt, state.font_section, fs_btn_bg, COLOR_TEXT_WHITE, if is_rec_fs { COLOR_AMBER } else { COLOR_CARD_BORDER });
+    let fs_hk_str = format_hotkey(state.pending_fullscreen_mods, state.pending_fullscreen_vk);
+    draw_shortcut_row(
+        mem_dc,
+        "Full Screen",
+        l.r2_y,
+        &l.rect_badge_fullscreen,
+        &l.rect_change_fullscreen,
+        &fs_hk_str,
+        is_rec_fs,
+        state.hovered_button == Some(ButtonId::ChangeFullscreenHotkey),
+    );
 
     // Row 3: History Sidebar
-    SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
-    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
-    let mut lbl3: Vec<u16> = "History Sidebar\0".encode_utf16().collect();
-    let mut r_lbl3 = RECT { left: 40, top: 172, right: 200, bottom: 194 };
-    DrawTextW(mem_dc, &mut lbl3, &mut r_lbl3, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    let hist_badge_rect = RECT { left: 200, top: 166, right: 395, bottom: 198 };
-    draw_rounded_card(mem_dc, &hist_badge_rect, COLOR_BG, COLOR_PRIMARY);
-    SelectObject(mem_dc, HGDIOBJ(state.font_badge.0));
-    let hist_hk_str = format_hotkey(state.pending_history_mods, state.pending_history_vk);
-    let mut hist_hk_w: Vec<u16> = format!("{hist_hk_str}\0").encode_utf16().collect();
-    let mut r_histhk = hist_badge_rect;
-    DrawTextW(mem_dc, &mut hist_hk_w, &mut r_histhk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
     let is_rec_hist = state.recording_target == Some(RecordingTarget::History);
-    let (hist_btn_txt, hist_btn_bg) = if is_rec_hist { ("Press keys...", COLOR_AMBER) } else if state.hovered_button == Some(ButtonId::ChangeHistoryHotkey) { ("Change...", COLOR_BTN_HOVER) } else { ("Change...", COLOR_BTN_BG) };
-    draw_button(mem_dc, &RECT_CHANGE_HISTORY, hist_btn_txt, state.font_section, hist_btn_bg, COLOR_TEXT_WHITE, if is_rec_hist { COLOR_AMBER } else { COLOR_CARD_BORDER });
+    let hist_hk_str = format_hotkey(state.pending_history_mods, state.pending_history_vk);
+    draw_shortcut_row(
+        mem_dc,
+        "History Sidebar",
+        l.r3_y,
+        &l.rect_badge_history,
+        &l.rect_change_history,
+        &hist_hk_str,
+        is_rec_hist,
+        state.hovered_button == Some(ButtonId::ChangeHistoryHotkey),
+    );
 
-    // Bottom note in Card 1
-    SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
+    // Card 1 Footnote
+    SelectObject(mem_dc, HGDIOBJ(state.font_caption.0));
     SetTextColor(mem_dc, COLOR_TEXT_MUTED);
     let mut note1: Vec<u16> = "Press any key combination while recording. Esc cancels.\0".encode_utf16().collect();
-    let mut r_note1 = RECT { left: 40, top: 218, right: 500, bottom: 238 };
-    DrawTextW(mem_dc, &mut note1, &mut r_note1, DT_LEFT | DT_SINGLELINE);
+    let mut r_note1 = RECT { left: l.in_l, top: l.note1_y, right: l.card_shortcut.right - 20, bottom: l.note1_y + 18 };
+    DrawTextW(mem_dc, &mut note1, &mut r_note1, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
-    // --- CARD 2: FLOATING THUMBNAIL LIFESPAN ---
-    let card2 = RECT { left: 24, top: 265, right: cr.right - 24, bottom: 405 };
-    draw_rounded_card(mem_dc, &card2, COLOR_CARD, COLOR_CARD_BORDER);
+    // --- CARD 2: FLOATING THUMBNAIL ---
+    draw_rounded_box(mem_dc, &l.card_thumbnail, COLOR_SECTION_BG, COLOR_BORDER, 8);
 
-    SelectObject(mem_dc, HGDIOBJ(state.font_section.0));
-    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
-    let mut t2: Vec<u16> = "FLOATING THUMBNAIL\0".encode_utf16().collect();
-    let mut r2 = RECT { left: 40, top: 277, right: 300, bottom: 297 };
-    DrawTextW(mem_dc, &mut t2, &mut r2, DT_LEFT | DT_SINGLELINE);
+    SelectObject(mem_dc, HGDIOBJ(state.font_heading.0));
+    SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
+    let mut t2: Vec<u16> = "Floating Thumbnail\0".encode_utf16().collect();
+    let mut r_t2 = RECT { left: l.in_l, top: l.t2_y, right: l.card_thumbnail.right - 20, bottom: l.t2_y + 20 };
+    DrawTextW(mem_dc, &mut t2, &mut r_t2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
-    SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
-    SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-    let mut sub2: Vec<u16> = "Preview popup at bottom-right corner after capture\0".encode_utf16().collect();
-    let mut r_sub2 = RECT { left: 40, top: 295, right: 460, bottom: 315 };
-    DrawTextW(mem_dc, &mut sub2, &mut r_sub2, DT_LEFT | DT_SINGLELINE);
+    SelectObject(mem_dc, HGDIOBJ(state.font_caption.0));
+    SetTextColor(mem_dc, COLOR_TEXT_SECONDARY);
+    let mut sub2: Vec<u16> = "Choose how long preview thumbnails stay on screen\0".encode_utf16().collect();
+    let mut r_sub2 = RECT { left: l.in_l, top: l.sub2_y, right: l.card_thumbnail.right - 20, bottom: l.sub2_y + 18 };
+    DrawTextW(mem_dc, &mut sub2, &mut r_sub2, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
-    // Pill: Infinite
-    let is_inf = state.pending_lifespan == LifespanMode::Infinite;
-    let inf_bg = if is_inf { COLOR_ACTIVE_PILL } else if state.hovered_button == Some(ButtonId::LifespanInfinite) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
-    let inf_border = if is_inf { COLOR_PRIMARY_HOVER } else { COLOR_CARD_BORDER };
-    let inf_txt_color = if is_inf { COLOR_TEXT_WHITE } else { COLOR_TEXT_MUTED };
-    draw_button(mem_dc, &RECT_LIFESPAN_INF, "Keep until closed", state.font_body, inf_bg, inf_txt_color, inf_border);
+    let draw_pill = |mem_dc: HDC, rect: &RECT, text: &str, is_selected: bool, is_hover: bool| {
+        let (bg, border, txt_color) = if is_selected {
+            (COLOR_ACCENT_PILL_BG, COLOR_ACCENT_BLUE, COLOR_TEXT_PRIMARY)
+        } else if is_hover {
+            (COLOR_BTN_HOVER, COLOR_BORDER, COLOR_TEXT_PRIMARY)
+        } else {
+            (COLOR_BTN_BG, COLOR_BORDER_SUBTLE, COLOR_TEXT_SECONDARY)
+        };
+        draw_button(mem_dc, rect, text, state.font_body_semibold, bg, txt_color, border, 6);
+    };
 
-    // Pill: Timed
-    let is_timed = matches!(state.pending_lifespan, LifespanMode::Timed(_));
-    let timed_bg = if is_timed { COLOR_ACTIVE_PILL } else if state.hovered_button == Some(ButtonId::LifespanTimed) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
-    let timed_border = if is_timed { COLOR_PRIMARY_HOVER } else { COLOR_CARD_BORDER };
-    let timed_txt_color = if is_timed { COLOR_TEXT_WHITE } else { COLOR_TEXT_MUTED };
-    draw_button(mem_dc, &RECT_LIFESPAN_TIMED, "Timed", state.font_body, timed_bg, timed_txt_color, timed_border);
+    draw_pill(mem_dc, &l.rect_lifespan_inf, "Keep until closed", state.pending_lifespan == LifespanMode::Infinite, state.hovered_button == Some(ButtonId::LifespanInfinite));
+    draw_pill(mem_dc, &l.rect_lifespan_timed, "Timed", is_timed, state.hovered_button == Some(ButtonId::LifespanTimed));
+    draw_pill(mem_dc, &l.rect_lifespan_dis, "Disable", state.pending_lifespan == LifespanMode::Disabled, state.hovered_button == Some(ButtonId::LifespanDisabled));
 
-    // Pill: Disabled
-    let is_dis = state.pending_lifespan == LifespanMode::Disabled;
-    let dis_bg = if is_dis { COLOR_ACTIVE_PILL } else if state.hovered_button == Some(ButtonId::LifespanDisabled) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
-    let dis_border = if is_dis { COLOR_PRIMARY_HOVER } else { COLOR_CARD_BORDER };
-    let dis_txt_color = if is_dis { COLOR_TEXT_WHITE } else { COLOR_TEXT_MUTED };
-    draw_button(mem_dc, &RECT_LIFESPAN_DIS, "Disable", state.font_body, dis_bg, dis_txt_color, dis_border);
-
-    // Timed stepper controls
+    // Stepper (active & visible when Timed is selected)
     if let LifespanMode::Timed(secs) = state.pending_lifespan {
         let dec_bg = if state.hovered_button == Some(ButtonId::LifespanDec) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
-        draw_button(mem_dc, &RECT_LIFESPAN_DEC, "-", state.font_section, dec_bg, COLOR_TEXT_WHITE, COLOR_CARD_BORDER);
+        draw_button(mem_dc, &l.rect_lifespan_dec, "-", state.font_heading, dec_bg, COLOR_TEXT_PRIMARY, COLOR_BORDER, 6);
 
-        let dur_rect = RECT { left: 235, top: 355, right: 325, bottom: 385 };
-        SelectObject(mem_dc, HGDIOBJ(state.font_section.0));
-        SetTextColor(mem_dc, COLOR_TEXT_WHITE);
-        let mut dur_w: Vec<u16> = format!("{secs} seconds\0").encode_utf16().collect();
-        let mut r_dur = dur_rect;
-        DrawTextW(mem_dc, &mut dur_w, &mut r_dur, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        draw_rounded_box(mem_dc, &l.rect_lifespan_dur, COLOR_INPUT_BG, COLOR_BORDER, 6);
+        SelectObject(mem_dc, HGDIOBJ(state.font_body_semibold.0));
+        SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
+        let mut dur_w: Vec<u16> = format!("{secs}s\0").encode_utf16().collect();
+        let mut r_dur = l.rect_lifespan_dur;
+        DrawTextW(mem_dc, &mut dur_w, &mut r_dur, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         let inc_bg = if state.hovered_button == Some(ButtonId::LifespanInc) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
-        draw_button(mem_dc, &RECT_LIFESPAN_INC, "+", state.font_section, inc_bg, COLOR_TEXT_WHITE, COLOR_CARD_BORDER);
+        draw_button(mem_dc, &l.rect_lifespan_inc, "+", state.font_heading, inc_bg, COLOR_TEXT_PRIMARY, COLOR_BORDER, 6);
     }
 
     // --- CARD 3: SAVE LOCATION ---
-    let card3 = RECT { left: 24, top: 420, right: cr.right - 24, bottom: 560 };
-    draw_rounded_card(mem_dc, &card3, COLOR_CARD, COLOR_CARD_BORDER);
+    draw_rounded_box(mem_dc, &l.card_location, COLOR_SECTION_BG, COLOR_BORDER, 8);
 
-    SelectObject(mem_dc, HGDIOBJ(state.font_section.0));
-    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
-    let mut t3: Vec<u16> = "SAVE LOCATION\0".encode_utf16().collect();
-    let mut r3 = RECT { left: 40, top: 432, right: 300, bottom: 452 };
-    DrawTextW(mem_dc, &mut t3, &mut r3, DT_LEFT | DT_SINGLELINE);
+    SelectObject(mem_dc, HGDIOBJ(state.font_heading.0));
+    SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
+    let mut t3: Vec<u16> = "Save Location\0".encode_utf16().collect();
+    let mut r_t3 = RECT { left: l.in_l, top: l.t3_y, right: l.card_location.right - 20, bottom: l.t3_y + 20 };
+    DrawTextW(mem_dc, &mut t3, &mut r_t3, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 
+    SelectObject(mem_dc, HGDIOBJ(state.font_caption.0));
+    SetTextColor(mem_dc, COLOR_TEXT_SECONDARY);
+    let mut sub3: Vec<u16> = "Folder where full-resolution screenshots are stored\0".encode_utf16().collect();
+    let mut r_sub3 = RECT { left: l.in_l, top: l.sub3_y, right: l.card_location.right - 20, bottom: l.sub3_y + 18 };
+    DrawTextW(mem_dc, &mut sub3, &mut r_sub3, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+
+    // Path Box
+    draw_rounded_box(mem_dc, &l.rect_path, COLOR_INPUT_BG, COLOR_BORDER, 6);
     SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
-    SetTextColor(mem_dc, COLOR_TEXT_MUTED);
-    let mut sub3: Vec<u16> = "Folder where full-resolution screenshots are saved\0".encode_utf16().collect();
-    let mut r_sub3 = RECT { left: 40, top: 452, right: 460, bottom: 472 };
-    DrawTextW(mem_dc, &mut sub3, &mut r_sub3, DT_LEFT | DT_SINGLELINE);
-
-    // Path display box
-    let path_rect = RECT { left: 40, top: 474, right: cr.right - 40, bottom: 502 };
-    draw_rounded_card(mem_dc, &path_rect, COLOR_BG, COLOR_CARD_BORDER);
-    SelectObject(mem_dc, HGDIOBJ(state.font_body.0));
-    SetTextColor(mem_dc, COLOR_TEXT_WHITE);
+    SetTextColor(mem_dc, COLOR_TEXT_PRIMARY);
     let path_str = state.pending_save_dir.to_string_lossy();
     let mut path_w: Vec<u16> = format!("{path_str}\0").encode_utf16().collect();
-    let mut r_path = RECT { left: 50, top: 474, right: cr.right - 50, bottom: 502 };
-    DrawTextW(mem_dc, &mut path_w, &mut r_path, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+    let mut r_path = RECT {
+        left: l.rect_path.left + 10,
+        top: l.rect_path.top,
+        right: l.rect_path.right - 10,
+        bottom: l.rect_path.bottom,
+    };
+    DrawTextW(mem_dc, &mut path_w, &mut r_path, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS | DT_NOPREFIX);
 
+    // Action buttons
     let browse_bg = if state.hovered_button == Some(ButtonId::BrowseFolder) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
-    draw_button(mem_dc, &RECT_BROWSE_FOLDER, "Browse...", state.font_body, browse_bg, COLOR_TEXT_WHITE, COLOR_CARD_BORDER);
+    draw_button(mem_dc, &l.rect_browse, "Browse...", state.font_body_semibold, browse_bg, COLOR_TEXT_PRIMARY, COLOR_BORDER, 6);
 
     let open_bg = if state.hovered_button == Some(ButtonId::OpenFolder) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
-    draw_button(mem_dc, &RECT_OPEN_FOLDER, "Open Folder", state.font_body, open_bg, COLOR_TEXT_WHITE, COLOR_CARD_BORDER);
+    draw_button(mem_dc, &l.rect_open_folder, "Open Folder", state.font_body_semibold, open_bg, COLOR_TEXT_PRIMARY, COLOR_BORDER, 6);
 
     // --- FOOTER BUTTONS ---
-    let save_bg = if state.hovered_button == Some(ButtonId::SaveApply) { COLOR_PRIMARY_HOVER } else { COLOR_PRIMARY };
-    draw_button(mem_dc, &RECT_SAVE_APPLY, "Save & Apply", state.font_section, save_bg, COLOR_TEXT_WHITE, COLOR_PRIMARY_HOVER);
+    let save_bg = if state.hovered_button == Some(ButtonId::SaveApply) { COLOR_ACCENT_HOVER } else { COLOR_ACCENT_BLUE };
+    draw_button(mem_dc, &l.rect_save_apply, "Save & Apply", state.font_body_semibold, save_bg, COLOR_TEXT_PRIMARY, COLOR_ACCENT_BLUE, 6);
 
     let cancel_bg = if state.hovered_button == Some(ButtonId::Cancel) { COLOR_BTN_HOVER } else { COLOR_BTN_BG };
-    draw_button(mem_dc, &RECT_CANCEL, "Cancel", state.font_section, cancel_bg, COLOR_TEXT_MUTED, COLOR_CARD_BORDER);
+    draw_button(mem_dc, &l.rect_cancel, "Cancel", state.font_body_semibold, cancel_bg, COLOR_TEXT_SECONDARY, COLOR_BORDER, 6);
 
     SelectObject(mem_dc, old_font);
 
@@ -469,8 +678,6 @@ unsafe fn paint_settings(hwnd: HWND, state: &SettingsState) {
 
     let _ = EndPaint(hwnd, &ps);
 }
-
-pub const WM_SNAPDOCK_SETTINGS_SAVED: u32 = WM_APP + 5;
 
 unsafe extern "system" fn settings_wndproc(
     hwnd: HWND,
@@ -490,11 +697,35 @@ unsafe extern "system" fn settings_wndproc(
             paint_settings(hwnd, state);
             LRESULT(0)
         }
+        WM_DPICHANGED => {
+            let new_dpi = (wparam.0 & 0xffff) as u32;
+            state.dpi_scale = new_dpi as f32 / 96.0;
+            state.reload_fonts();
+
+            let rect = *(lparam.0 as *const RECT);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            LRESULT(0)
+        }
         WM_SETCURSOR => {
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
             let _ = ScreenToClient(hwnd, &mut pt);
-            if hit_test(pt).is_some() {
+
+            let mut cr = RECT::default();
+            let _ = GetClientRect(hwnd, &mut cr);
+            let layout = compute_layout(&cr, state.dpi_scale);
+            let is_timed = matches!(state.pending_lifespan, LifespanMode::Timed(_));
+
+            if hit_test(pt, &layout, is_timed).is_some() {
                 let cursor = LoadCursorW(None, IDC_HAND).unwrap_or_default();
                 SetCursor(Some(cursor));
                 return LRESULT(1);
@@ -506,7 +737,12 @@ unsafe extern "system" fn settings_wndproc(
             let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
             let pt = POINT { x, y };
 
-            let hit = hit_test(pt);
+            let mut cr = RECT::default();
+            let _ = GetClientRect(hwnd, &mut cr);
+            let layout = compute_layout(&cr, state.dpi_scale);
+            let is_timed = matches!(state.pending_lifespan, LifespanMode::Timed(_));
+
+            let hit = hit_test(pt, &layout, is_timed);
             if hit != state.hovered_button {
                 state.hovered_button = hit;
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -587,7 +823,12 @@ unsafe extern "system" fn settings_wndproc(
             let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
             let pt = POINT { x, y };
 
-            match hit_test(pt) {
+            let mut cr = RECT::default();
+            let _ = GetClientRect(hwnd, &mut cr);
+            let layout = compute_layout(&cr, state.dpi_scale);
+            let is_timed = matches!(state.pending_lifespan, LifespanMode::Timed(_));
+
+            match hit_test(pt, &layout, is_timed) {
                 Some(ButtonId::ChangeRegionHotkey) => {
                     state.recording_target = if state.recording_target == Some(RecordingTarget::Region) { None } else { Some(RecordingTarget::Region) };
                     let _ = InvalidateRect(Some(hwnd), None, false);
@@ -701,6 +942,19 @@ unsafe extern "system" fn settings_wndproc(
     }
 }
 
+pub fn get_system_dpi_scale() -> f32 {
+    unsafe {
+        let dc = GetDC(None);
+        let dpi = GetDeviceCaps(Some(dc), LOGPIXELSX);
+        ReleaseDC(None, dc);
+        if dpi > 0 {
+            dpi as f32 / 96.0
+        } else {
+            1.0
+        }
+    }
+}
+
 pub fn open_settings_window(main_hwnd: HWND, cfg: &AppConfig) -> Option<HWND> {
     unsafe {
         let instance = GetModuleHandleW(None).ok()?;
@@ -715,20 +969,36 @@ pub fn open_settings_window(main_hwnd: HWND, cfg: &AppConfig) -> Option<HWND> {
         };
         let _ = RegisterClassW(&wc);
 
+        let dpi_scale = get_system_dpi_scale();
+        let client_w = (BASE_WIN_W as f32 * dpi_scale).round() as i32;
+        let client_h = (BASE_WIN_H as f32 * dpi_scale).round() as i32;
+
+        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        let mut wr = RECT {
+            left: 0,
+            top: 0,
+            right: client_w,
+            bottom: client_h,
+        };
+        let _ = AdjustWindowRectEx(&mut wr, style, false, WINDOW_EX_STYLE::default());
+
+        let total_w = wr.right - wr.left;
+        let total_h = wr.bottom - wr.top;
+
         let screen_w = GetSystemMetrics(SM_CXSCREEN);
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
-        let x = (screen_w - WIN_W) / 2;
-        let y = (screen_h - WIN_H) / 2;
+        let x = (screen_w - total_w) / 2;
+        let y = (screen_h - total_h) / 2;
 
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             class_name,
             w!("Snapdock Settings"),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+            style,
             x,
             y,
-            WIN_W,
-            WIN_H,
+            total_w,
+            total_h,
             None,
             None,
             Some(instance.into()),
@@ -743,7 +1013,7 @@ pub fn open_settings_window(main_hwnd: HWND, cfg: &AppConfig) -> Option<HWND> {
             std::mem::size_of::<i32>() as u32,
         );
 
-        let state = Box::new(SettingsState::new(main_hwnd, cfg));
+        let state = Box::new(SettingsState::new(main_hwnd, cfg, dpi_scale));
         let state_raw = Box::into_raw(state);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_raw as isize);
 
